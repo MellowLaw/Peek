@@ -50,12 +50,15 @@ jobs:
           tagName: v__VERSION__
           releaseName: "Peek v__VERSION__"
           releaseBody: |
-            Windows 10 / 11 (x64) NSIS installer and signed auto-updater release.
+            ### How to Download & Install
 
-            ### First launch note (Windows SmartScreen)
-            Peek is currently unsigned by a paid Windows Authenticode certificate, so Windows Defender SmartScreen may show *"Windows protected your PC"* on first install/launch. Click **More info** -> **Run anyway**.
+            1. Under **Assets** below, download **`Peek___VERSION___x64-setup.exe`** (Windows 10 / 11 x64 installer).
+               *You can ignore `latest.json`, `.sig`, and `Source code` — those are only used by Peek's built-in updater and developers.*
+            2. Double-click **`Peek___VERSION___x64-setup.exe`** to install Peek.
+            3. If Windows Defender SmartScreen shows *"Windows protected your PC"* on first install/launch, click **More info** → **Run anyway**.
 
-            Future updates are cryptographically signed and delivered automatically inside Peek (**Update now** / **Later**).
+            ### Automatic Updates
+            Future updates are cryptographically signed and delivered right inside Peek (**Update now** / **Later**, or check manually in **Settings → Notch → Updates**).
           releaseDraft: false
           prerelease: false
           args: --ci

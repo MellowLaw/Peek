@@ -6,9 +6,11 @@
 
 ## Download & Install
 
-1. Open [Releases](https://github.com/MellowLaw/Peek/releases/latest) and download **`Peek_<version>_x64-setup.exe`**.
-2. Double-click the installer to install for your Windows user account (if Windows SmartScreen shows *"Windows protected your PC"*, click **More info -> Run anyway**).
-3. **Automatic updates**: Peek checks GitHub Releases automatically on launch and notifies you in the top notch when a signed update is available (**Update now** or **Later**, or check anytime in **Settings -> Notch -> Updates**).
+1. Open [Latest Release](https://github.com/MellowLaw/Peek/releases/latest) and expand **Assets** at the bottom.
+2. Click **`Peek_<version>_x64-setup.exe`** to download the Windows installer.
+   *Ignore `latest.json`, `.sig`, and `Source code` unless you are building from source — Peek uses those internally for updates.*
+3. Double-click the downloaded `.exe` installer. If Windows Defender SmartScreen shows *"Windows protected your PC"*, click **More info → Run anyway**.
+4. **Automatic updates**: Once installed, Peek checks for signed releases automatically on launch and lets you click **Update now** or **Later** right from the notch (or **Settings → Notch → Updates**).
 
 Requirements: Windows 10 or 11 (x64) with Microsoft Edge WebView2 Runtime (built into Windows 11). Optional screen recording uses `ffmpeg.exe` (`winget install Gyan.FFmpeg`).
 
