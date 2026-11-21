@@ -1,0 +1,30 @@
+# Dependencies & build artifacts
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/android/
+src-tauri/gen/apple/
+
+# Logs, caches, signing keys, and environment files
+*.log
+npm-debug.log*
+.env
+.env.*
+!.env.example
+*.key
+*.sig
+
+# Editor & OS artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Internal planning docs and local reference assets (kept local only)
+AGENTS.md
+docs/
