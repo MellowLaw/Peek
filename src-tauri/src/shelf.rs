@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::{BufReader, Read, Write},
+    io::{BufReader, BufWriter, Read, Write},
     net::UdpSocket,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -25,6 +25,8 @@ use crate::preferences::write_json_atomic;
 const SHELF_FILE: &str = "shelf.json";
 const MAX_THUMBNAIL_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_SHELF_ITEMS: usize = 200;
+const MAX_RECEIVE_BYTES: u64 = 250 * 1024 * 1024;
+const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +61,11 @@ pub struct QrTransferInfo {
     pub url: String,
     pub qr_data_url: String,
     pub expires_in_seconds: u64,
+    pub mode: String,
+    pub save_dir: Option<String>,
+    pub received_count: u32,
+    pub last_received: Option<String>,
+    pub firewall_blocked: bool,
 }
 
 struct ShelfInner {
@@ -66,6 +73,8 @@ struct ShelfInner {
     thumbs: HashMap<(String, u64), Option<String>>,
     next_id: u64,
     qr_stop: Option<oneshot::Sender<()>>,
+    qr_active: Option<(u64, QrTransferInfo)>,
+    qr_seq: u64,
 }
 
 pub struct ShelfState {
@@ -87,6 +96,8 @@ impl ShelfState {
                 thumbs: HashMap::new(),
                 next_id,
                 qr_stop: None,
+                qr_active: None,
+                qr_seq: 0,
             }),
             config_dir,
         }
@@ -238,7 +249,11 @@ fn make_thumbnail(path: &Path) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn make_shell_thumbnail(path: &Path) -> Option<String> {
+pub(crate) fn extract_shell_icon_data_url(
+    path: &Path,
+    size_px: i32,
+    icon_only: bool,
+) -> Option<String> {
     use windows::core::HSTRING;
     use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, SIZE};
     use windows::Win32::Graphics::Gdi::{
@@ -250,12 +265,12 @@ fn make_shell_thumbnail(path: &Path) -> Option<String> {
         IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
     };
 
-    fn extract_on_sta(path: &Path) -> Option<String> {
+    fn extract_on_sta(path: &Path, size_px: i32, icon_only: bool) -> Option<String> {
         unsafe {
             let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             if hr == RPC_E_CHANGED_MODE {
                 let owned = path.to_path_buf();
-                return std::thread::spawn(move || extract_on_sta(&owned))
+                return std::thread::spawn(move || extract_on_sta(&owned, size_px, icon_only))
                     .join()
                     .ok()
                     .flatten();
@@ -265,9 +280,18 @@ fn make_shell_thumbnail(path: &Path) -> Option<String> {
                 let hpath = HSTRING::from(path.as_os_str());
                 let factory: IShellItemImageFactory =
                     SHCreateItemFromParsingName(&hpath, None).ok()?;
-                let size = SIZE { cx: 256, cy: 256 };
+                let clamped = size_px.clamp(16, 512);
+                let size = SIZE {
+                    cx: clamped,
+                    cy: clamped,
+                };
+                let flags = if icon_only {
+                    SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK
+                } else {
+                    SIIGBF_BIGGERSIZEOK
+                };
                 let hbm = factory
-                    .GetImage(size, SIIGBF_BIGGERSIZEOK)
+                    .GetImage(size, flags)
                     .or_else(|_| factory.GetImage(size, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK))
                     .ok()?;
 
@@ -367,7 +391,12 @@ fn make_shell_thumbnail(path: &Path) -> Option<String> {
         }
     }
 
-    extract_on_sta(path)
+    extract_on_sta(path, size_px, icon_only)
+}
+
+#[cfg(windows)]
+fn make_shell_thumbnail(path: &Path) -> Option<String> {
+    extract_shell_icon_data_url(path, 256, false)
 }
 
 #[cfg(not(windows))]
@@ -1393,8 +1422,406 @@ fn sanitize_content_disposition_name(name: &str) -> String {
     }
 }
 
+fn render_qr_data_url(url: &str) -> Result<String, String> {
+    let code = QrCode::new(url.as_bytes()).map_err(|e| e.to_string())?;
+    let svg_xml = code
+        .render::<svg::Color>()
+        .min_dimensions(180, 180)
+        .dark_color(svg::Color("#080808"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+    Ok(format!(
+        "data:image/svg+xml;base64,{}",
+        STANDARD.encode(svg_xml.as_bytes())
+    ))
+}
+
+fn percent_decode_utf8(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn sanitize_upload_filename(raw: &str) -> String {
+    let decoded = percent_decode_utf8(raw);
+    let base = decoded.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
+        .collect();
+    let mut trimmed = cleaned
+        .trim_matches(|c: char| c.is_whitespace() || c == '.')
+        .to_string();
+    if trimmed.is_empty() {
+        return "phone-file".into();
+    }
+
+    let first_stem = trimmed.split('.').next().unwrap_or("");
+    let upper_stem = first_stem.to_ascii_uppercase();
+    let is_reserved = matches!(
+        upper_stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if is_reserved {
+        trimmed.insert(0, '_');
+    }
+
+    const MAX_CHARS: usize = 120;
+    if trimmed.chars().count() > MAX_CHARS {
+        let p = Path::new(&trimmed);
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext_part = if !ext.is_empty() && ext.chars().count() <= 16 {
+            format!(".{ext}")
+        } else {
+            String::new()
+        };
+        let keep_stem = MAX_CHARS.saturating_sub(ext_part.chars().count()).max(8);
+        let stem_src = if ext_part.is_empty() {
+            trimmed.as_str()
+        } else {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(trimmed.as_str())
+        };
+        let trunc_stem: String = stem_src.chars().take(keep_stem).collect();
+        let trunc_stem = trunc_stem.trim_end_matches(|c: char| c.is_whitespace() || c == '.');
+        let base_stem = if trunc_stem.is_empty() {
+            "phone-file"
+        } else {
+            trunc_stem
+        };
+        return format!("{base_stem}{ext_part}");
+    }
+
+    trimmed
+}
+
+fn received_files_dir() -> Result<PathBuf, String> {
+    let base = std::env::var("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let dir = base.join("Downloads").join("Peek");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+async fn read_http_headers(socket: &mut tokio::net::TcpStream) -> Option<(Vec<u8>, usize)> {
+    let mut buf = Vec::with_capacity(2048);
+    let mut tmp = [0u8; 2048];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            return Some((buf, pos + 4));
+        }
+        if buf.len() >= MAX_HTTP_HEADER_BYTES {
+            return None;
+        }
+        let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remain.is_zero() {
+            return None;
+        }
+        let Ok(Ok(n)) = tokio::time::timeout(remain, socket.read(&mut tmp)).await else {
+            return None;
+        };
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+}
+
+fn render_receive_page(upload_route: &str) -> String {
+    const PEEK_ICON_SVG: &str = include_str!("../icons/peek-icon.svg");
+    let icon_b64 = STANDARD.encode(PEEK_ICON_SVG.as_bytes());
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Send to Peek</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,{icon_b64}" />
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ margin: 0; padding: 24px 16px; background: #080808; color: #f4f4f4; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+  .wrap {{ max-width: 420px; margin: 0 auto; display: grid; gap: 14px; }}
+  .card {{ background: #141414; border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 18px; display: grid; gap: 12px; }}
+  .brand-row {{ display: flex; align-items: center; gap: 10px; }}
+  .brand-icon {{ width: 28px; height: 28px; flex: none; display: block; }}
+  .brand-icon svg {{ width: 100%; height: 100%; display: block; }}
+  h1 {{ margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }}
+  p {{ margin: 0; font-size: 13px; color: #9e9e9e; line-height: 1.4; }}
+  .pick {{ display: block; width: 100%; text-align: center; background: #f4f4f4; color: #080808; font-weight: 700; font-size: 15px; padding: 14px 18px; border-radius: 999px; cursor: pointer; }}
+  input[type=file] {{ display: none; }}
+  .list {{ display: grid; gap: 8px; }}
+  .item {{ background: #1a1a1a; border-radius: 12px; padding: 10px 12px; display: grid; gap: 6px; }}
+  .row {{ display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; }}
+  .name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }}
+  .st {{ color: #9e9e9e; font-size: 12px; flex: none; font-variant-numeric: tabular-nums; }}
+  .st.ok {{ color: #f4f4f4; }}
+  .st.err {{ color: #f87171; }}
+  .bar {{ height: 4px; background: #262626; border-radius: 999px; overflow: hidden; }}
+  .fill {{ height: 100%; width: 0%; background: #f4f4f4; transition: width 120ms linear; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="brand-row">
+      <span class="brand-icon" aria-hidden="true">{peek_icon_svg}</span>
+      <h1>Send to Desktop</h1>
+    </div>
+    <p>Files save straight to Downloads\Peek and appear in Peek Files.</p>
+    <label class="pick">Choose files or photos<input id="picker" type="file" multiple /></label>
+  </div>
+  <div id="list" class="list"></div>
+</div>
+<script>
+const UPLOAD_URL = "{upload_route}";
+const picker = document.getElementById("picker");
+const list = document.getElementById("list");
+picker.addEventListener("change", async () => {{
+  const files = Array.from(picker.files || []);
+  picker.value = "";
+  for (const file of files) {{
+    await sendOne(file);
+  }}
+}});
+function sendOne(file) {{
+  return new Promise((resolve) => {{
+    const card = document.createElement("div");
+    card.className = "item";
+    const row = document.createElement("div");
+    row.className = "row";
+    const nameEl = document.createElement("span");
+    nameEl.className = "name";
+    nameEl.textContent = file.name || "file";
+    const st = document.createElement("span");
+    st.className = "st";
+    st.textContent = "0%";
+    row.append(nameEl, st);
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const fill = document.createElement("div");
+    fill.className = "fill";
+    bar.append(fill);
+    card.append(row, bar);
+    list.prepend(card);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", UPLOAD_URL + "?name=" + encodeURIComponent(file.name || "phone-file"), true);
+    xhr.upload.onprogress = (ev) => {{
+      if (ev.lengthComputable && ev.total > 0) {{
+        const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
+        fill.style.width = pct + "%";
+        st.textContent = pct + "%";
+      }}
+    }};
+    xhr.onload = () => {{
+      if (xhr.status >= 200 && xhr.status < 300) {{
+        fill.style.width = "100%";
+        st.className = "st ok";
+        st.textContent = "Sent";
+      }} else {{
+        st.className = "st err";
+        st.textContent = "Failed (" + xhr.status + ")";
+      }}
+      resolve();
+    }};
+    xhr.onerror = () => {{
+      st.className = "st err";
+      st.textContent = "Network error";
+      resolve();
+    }};
+    xhr.send(file);
+  }});
+}}
+</script>
+</body>
+</html>"#,
+        upload_route = upload_route,
+        icon_b64 = icon_b64,
+        peek_icon_svg = PEEK_ICON_SVG,
+    )
+}
+
+fn firewall_blocked_now() -> bool {
+    #[cfg(windows)]
+    {
+        crate::windows::is_exe_inbound_firewall_blocked()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+async fn handle_qr_receive_connection(
+    mut socket: tokio::net::TcpStream,
+    page: &str,
+    page_route: &str,
+    up_route: &str,
+    dest_dir: &Path,
+) -> Option<(PathBuf, String)> {
+    let (buf, header_end) = read_http_headers(&mut socket).await?;
+    let header_str = String::from_utf8_lossy(&buf[..header_end]);
+    let mut lines = header_str.lines();
+    let first_line = lines.next().unwrap_or("");
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let full_target = parts.next().unwrap_or("");
+    let (req_path, query) = full_target.split_once('?').unwrap_or((full_target, ""));
+
+    if method == "GET" && constant_time_eq(req_path.as_bytes(), page_route.as_bytes()) {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            page.len(),
+            page
+        );
+        let _ = socket.write_all(resp.as_bytes()).await;
+        return None;
+    }
+
+    if method == "POST" && constant_time_eq(req_path.as_bytes(), up_route.as_bytes()) {
+        let mut content_len: Option<u64> = None;
+        let mut expect_continue = false;
+        for line in lines {
+            if let Some((k, v)) = line.split_once(':') {
+                if k.trim().eq_ignore_ascii_case("content-length") {
+                    content_len = v.trim().parse::<u64>().ok();
+                } else if k.trim().eq_ignore_ascii_case("expect")
+                    && v.to_ascii_lowercase().contains("100-continue")
+                {
+                    expect_continue = true;
+                }
+            }
+        }
+
+        let Some(total_len) = content_len.filter(|&l| l > 0) else {
+            let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 15\r\nConnection: close\r\n\r\nMissing payload").await;
+            return None;
+        };
+        if total_len > MAX_RECEIVE_BYTES {
+            let _ = socket.write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 14\r\nConnection: close\r\n\r\nFile too large").await;
+            return None;
+        }
+
+        let raw_name = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("name="))
+            .unwrap_or("phone-file");
+        let safe_name = sanitize_upload_filename(raw_name);
+
+        let Ok(temp) = tempfile::NamedTempFile::new_in(dest_dir) else {
+            let _ = socket.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 11\r\nConnection: close\r\n\r\nDisk error\n").await;
+            return None;
+        };
+        let mut writer = BufWriter::with_capacity(64 * 1024, temp);
+
+        let trailing = &buf[header_end..];
+        let mut remaining = total_len;
+        if !trailing.is_empty() {
+            let take = (trailing.len() as u64).min(remaining) as usize;
+            if writer.write_all(&trailing[..take]).is_err() {
+                return None;
+            }
+            remaining -= take as u64;
+        } else if expect_continue {
+            let _ = socket.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await;
+        }
+
+        let mut chunk = vec![0u8; 64 * 1024];
+        while remaining > 0 {
+            let want = chunk.len().min(remaining as usize);
+            let Ok(Ok(read_n)) =
+                tokio::time::timeout(Duration::from_secs(30), socket.read(&mut chunk[..want]))
+                    .await
+            else {
+                return None;
+            };
+            if read_n == 0 {
+                return None;
+            }
+            if writer.write_all(&chunk[..read_n]).is_err() {
+                return None;
+            }
+            remaining -= read_n as u64;
+        }
+
+        let dir_save = dest_dir.to_path_buf();
+        let name_save = safe_name.clone();
+        let saved_res = tokio::task::spawn_blocking(move || {
+            writer.flush().map_err(|e| e.to_string())?;
+            let temp = writer
+                .into_inner()
+                .map_err(|e| e.into_error().to_string())?;
+            let final_path = unique_dest_path(&dir_save, &name_save);
+            temp.persist(&final_path).map_err(|e| e.error.to_string())?;
+            let final_name = final_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&name_save)
+                .to_string();
+            Ok::<(PathBuf, String), String>((final_path, final_name))
+        })
+        .await;
+
+        let Ok(Ok((final_path, final_name))) = saved_res else {
+            let _ = socket.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 10\r\nConnection: close\r\n\r\nSave error").await;
+            return None;
+        };
+
+        let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").await;
+        return Some((final_path, final_name));
+    }
+
+    let _ = socket
+        .write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found",
+        )
+        .await;
+    None
+}
+
 #[tauri::command]
 pub async fn start_qr_transfer(
+    app: AppHandle,
     state: tauri::State<'_, ShelfState>,
     id: String,
 ) -> Result<QrTransferInfo, String> {
@@ -1403,6 +1830,7 @@ pub async fn start_qr_transfer(
         if let Some(prev) = guard.qr_stop.take() {
             let _ = prev.send(());
         }
+        guard.qr_active = None;
         guard
             .entries
             .iter()
@@ -1438,24 +1866,34 @@ pub async fn start_qr_transfer(
         .collect();
     let route = format!("/dl/{token}/{safe_name}");
     let url = format!("http://{ip}:{port}{route}");
+    let qr_data_url = render_qr_data_url(&url)?;
 
-    let code = QrCode::new(url.as_bytes()).map_err(|e| e.to_string())?;
-    let svg_xml = code
-        .render::<svg::Color>()
-        .min_dimensions(180, 180)
-        .dark_color(svg::Color("#080808"))
-        .light_color(svg::Color("#ffffff"))
-        .build();
-    let qr_data_url = format!(
-        "data:image/svg+xml;base64,{}",
-        STANDARD.encode(svg_xml.as_bytes())
-    );
+    let info = QrTransferInfo {
+        file_name: entry.name.clone(),
+        url,
+        qr_data_url,
+        expires_in_seconds: 300,
+        mode: "send".into(),
+        save_dir: None,
+        received_count: 0,
+        last_received: None,
+        firewall_blocked: firewall_blocked_now(),
+    };
 
     let (stop_tx, mut stop_rx) = oneshot::channel();
-    state.inner.lock().unwrap().qr_stop = Some(stop_tx);
+    let seq = {
+        let mut guard = state.inner.lock().unwrap();
+        guard.qr_seq += 1;
+        let seq = guard.qr_seq;
+        guard.qr_stop = Some(stop_tx);
+        guard.qr_active = Some((seq, info.clone()));
+        seq
+    };
+    let _ = app.emit("qr-transfer-updated", Some(&info));
 
     let expected_route = route;
     let file_name = entry.name.clone();
+    let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
         let deadline = tokio::time::sleep(Duration::from_secs(300));
         tokio::pin!(deadline);
@@ -1513,21 +1951,201 @@ pub async fn start_qr_transfer(
                 }
             }
         }
+        let st = app_for_task.state::<ShelfState>();
+        let mut guard = st.inner.lock().unwrap();
+        if guard.qr_active.as_ref().is_some_and(|(s, _)| *s == seq) {
+            guard.qr_active = None;
+            guard.qr_stop = None;
+            drop(guard);
+            let _ = app_for_task.emit("qr-transfer-updated", Option::<QrTransferInfo>::None);
+        }
     });
 
-    Ok(QrTransferInfo {
-        file_name: entry.name,
-        url,
-        qr_data_url,
-        expires_in_seconds: 300,
-    })
+    Ok(info)
 }
 
 #[tauri::command]
-pub fn stop_qr_transfer(state: tauri::State<'_, ShelfState>) {
-    if let Some(tx) = state.inner.lock().unwrap().qr_stop.take() {
+pub async fn start_qr_receive(
+    app: AppHandle,
+    state: tauri::State<'_, ShelfState>,
+) -> Result<QrTransferInfo, String> {
+    {
+        let mut guard = state.inner.lock().unwrap();
+        if let Some(prev) = guard.qr_stop.take() {
+            let _ = prev.send(());
+        }
+        guard.qr_active = None;
+    }
+
+    let dest_dir = received_files_dir()?;
+    let listener = TcpListener::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let ip = detect_lan_ip();
+    #[cfg(windows)]
+    let token = crate::windows::generate_random_hex(16);
+    #[cfg(not(windows))]
+    let token = "localtoken".to_string();
+
+    let route = format!("/up/{token}");
+    let upload_route = format!("/up/{token}/file");
+    let url = format!("http://{ip}:{port}{route}");
+    let qr_data_url = render_qr_data_url(&url)?;
+    let html_page = render_receive_page(&upload_route);
+
+    let info = QrTransferInfo {
+        file_name: "Receive from phone".into(),
+        url,
+        qr_data_url,
+        expires_in_seconds: 300,
+        mode: "receive".into(),
+        save_dir: Some(dest_dir.to_string_lossy().to_string()),
+        received_count: 0,
+        last_received: None,
+        firewall_blocked: firewall_blocked_now(),
+    };
+
+    let (stop_tx, mut stop_rx) = oneshot::channel();
+    let seq = {
+        let mut guard = state.inner.lock().unwrap();
+        guard.qr_seq += 1;
+        let seq = guard.qr_seq;
+        guard.qr_stop = Some(stop_tx);
+        guard.qr_active = Some((seq, info.clone()));
+        seq
+    };
+    let _ = app.emit("qr-transfer-updated", Some(&info));
+
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let deadline = tokio::time::sleep(Duration::from_secs(300));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = &mut deadline => break,
+                accepted = listener.accept() => {
+                    let Ok((socket, _)) = accepted else { continue; };
+                    let page = html_page.clone();
+                    let page_route = route.clone();
+                    let up_route = upload_route.clone();
+                    let dir_for_conn = dest_dir.clone();
+                    let app_conn = app_for_task.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let Some((final_path, final_name)) = handle_qr_receive_connection(
+                            socket,
+                            &page,
+                            &page_route,
+                            &up_route,
+                            &dir_for_conn,
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+
+                        let app_ingest = app_conn.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Ok((items, _)) = app_ingest
+                                .state::<ShelfState>()
+                                .add_paths(std::slice::from_ref(&final_path))
+                            {
+                                let _ = app_ingest.emit("shelf-updated", &items);
+                            }
+                        })
+                        .await;
+
+                        let updated_info = {
+                            let st = app_conn.state::<ShelfState>();
+                            let mut guard = st.inner.lock().unwrap();
+                            if let Some((cur_seq, cur_info)) = guard.qr_active.as_mut() {
+                                if *cur_seq == seq {
+                                    cur_info.received_count += 1;
+                                    cur_info.last_received = Some(final_name.clone());
+                                    Some(cur_info.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(info_now) = updated_info {
+                            let _ = app_conn.emit("qr-transfer-updated", Some(&info_now));
+                        }
+                        app_conn.state::<ActivityManager>().push_activity(
+                            "Files",
+                            "Received from phone",
+                            final_name,
+                            Priority::Normal,
+                            3500,
+                            Some("files"),
+                            false,
+                            false,
+                        );
+                    });
+                }
+            }
+        }
+        let st = app_for_task.state::<ShelfState>();
+        let mut guard = st.inner.lock().unwrap();
+        if guard.qr_active.as_ref().is_some_and(|(s, _)| *s == seq) {
+            guard.qr_active = None;
+            guard.qr_stop = None;
+            drop(guard);
+            let _ = app_for_task.emit("qr-transfer-updated", Option::<QrTransferInfo>::None);
+        }
+    });
+
+    Ok(info)
+}
+
+#[tauri::command]
+pub fn get_qr_transfer(state: tauri::State<'_, ShelfState>) -> Option<QrTransferInfo> {
+    let blocked = firewall_blocked_now();
+    let mut guard = state.inner.lock().unwrap();
+    if let Some((_, info)) = guard.qr_active.as_mut() {
+        info.firewall_blocked = blocked;
+        Some(info.clone())
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+pub async fn allow_lan_firewall(
+    app: AppHandle,
+    state: tauri::State<'_, ShelfState>,
+) -> Result<Option<QrTransferInfo>, String> {
+    #[cfg(windows)]
+    tokio::task::spawn_blocking(crate::windows::allow_exe_in_windows_firewall)
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let blocked = firewall_blocked_now();
+    let updated = {
+        let mut guard = state.inner.lock().unwrap();
+        if let Some((_, info)) = guard.qr_active.as_mut() {
+            info.firewall_blocked = blocked;
+            Some(info.clone())
+        } else {
+            None
+        }
+    };
+    let _ = app.emit("qr-transfer-updated", updated.as_ref());
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn stop_qr_transfer(app: AppHandle, state: tauri::State<'_, ShelfState>) {
+    let mut guard = state.inner.lock().unwrap();
+    if let Some(tx) = guard.qr_stop.take() {
         let _ = tx.send(());
     }
+    guard.qr_active = None;
+    drop(guard);
+    let _ = app.emit("qr-transfer-updated", Option::<QrTransferInfo>::None);
 }
 
 #[cfg(test)]
@@ -1607,5 +2225,109 @@ mod tests {
             "report_final___X-Test: 1_foo.pdf"
         );
         assert_eq!(sanitize_content_disposition_name(""), "file");
+    }
+
+    #[test]
+    fn sanitizes_upload_filenames_and_avoids_collisions() {
+        assert_eq!(sanitize_upload_filename("../../evil.exe"), "evil.exe");
+        assert_eq!(
+            sanitize_upload_filename("sub\\bad:name?.png"),
+            "badname.png"
+        );
+        assert_eq!(sanitize_upload_filename("CON.txt"), "_CON.txt");
+        assert_eq!(sanitize_upload_filename("nul"), "_nul");
+        assert_eq!(sanitize_upload_filename("my%20photo.jpg"), "my photo.jpg");
+        assert_eq!(sanitize_upload_filename("..%2F..%2F"), "phone-file");
+        assert_eq!(sanitize_upload_filename(""), "phone-file");
+
+        let dir = TempDir::new().unwrap();
+        let first = dir.path().join("photo.jpg");
+        fs::write(&first, b"1").unwrap();
+        let next = unique_dest_path(dir.path(), "photo.jpg");
+        assert_eq!(next.file_name().unwrap().to_str().unwrap(), "photo (1).jpg");
+        fs::write(&next, b"2").unwrap();
+        let third = unique_dest_path(dir.path(), "photo.jpg");
+        assert_eq!(
+            third.file_name().unwrap().to_str().unwrap(),
+            "photo (2).jpg"
+        );
+    }
+
+    #[test]
+    fn qr_receive_http_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let dest = dir.path().to_path_buf();
+        let route = "/up/tok123".to_string();
+        let upload_route = "/up/tok123/file".to_string();
+        let page = render_receive_page(&upload_route);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let srv_page = page.clone();
+            let srv_route = route.clone();
+            let srv_up = upload_route.clone();
+            let srv_dest = dest.clone();
+            let server = tokio::spawn(async move {
+                let mut uploaded = None;
+                for _ in 0..3 {
+                    let (sock, _) = listener.accept().await.unwrap();
+                    if let Some(res) = handle_qr_receive_connection(
+                        sock,
+                        &srv_page,
+                        &srv_route,
+                        &srv_up,
+                        &srv_dest,
+                    )
+                    .await
+                    {
+                        uploaded = Some(res);
+                    }
+                }
+                uploaded
+            });
+
+            // 1) GET upload HTML
+            let mut s1 = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s1.write_all(format!("GET {route} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut resp1 = String::new();
+            s1.read_to_string(&mut resp1).await.unwrap();
+            assert!(resp1.starts_with("HTTP/1.1 200 OK"));
+            assert!(resp1.contains("Choose files or photos"));
+
+            // 2) POST upload payload split across header + body
+            let payload = b"hello from phone";
+            let mut s2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let req2 = format!(
+                "POST {upload_route}?name=my%20note.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+                payload.len()
+            );
+            s2.write_all(req2.as_bytes()).await.unwrap();
+            s2.write_all(payload).await.unwrap();
+            let mut resp2 = String::new();
+            s2.read_to_string(&mut resp2).await.unwrap();
+            assert!(resp2.starts_with("HTTP/1.1 200 OK"));
+            assert!(resp2.contains("{\"ok\":true}"));
+
+            // 3) Bad token -> 404
+            let mut s3 = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s3.write_all(b"GET /up/wrong HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            let mut resp3 = String::new();
+            s3.read_to_string(&mut resp3).await.unwrap();
+            assert!(resp3.starts_with("HTTP/1.1 404 Not Found"));
+
+            let (saved_path, saved_name) = server.await.unwrap().expect("upload saved");
+            assert_eq!(saved_name, "my note.txt");
+            assert_eq!(fs::read(saved_path).unwrap(), b"hello from phone");
+        });
     }
 }

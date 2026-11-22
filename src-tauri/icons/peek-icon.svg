@@ -1,11 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect x="24" y="24" width="464" height="464" rx="112" fill="#080808" stroke="#222222" stroke-width="10"/>
-  <path d="M 88 24 H 424 V 66 H 394 A 34 34 0 0 0 360 100 V 144 A 64 64 0 0 1 296 208 H 216 A 64 64 0 0 1 152 144 V 100 A 34 34 0 0 0 118 66 H 88 Z" fill="#f4f4f4"/>
-  <circle cx="204" cy="136" r="18" fill="#080808"/>
-  <rect x="246" y="124" width="76" height="24" rx="12" fill="#080808"/>
-  <rect x="132" y="294" width="248" height="40" rx="20" fill="#181818" stroke="#2c2c2c" stroke-width="4"/>
-  <circle cx="164" cy="314" r="8" fill="#e5e5e5"/>
-  <rect x="188" y="307" width="108" height="14" rx="7" fill="#4a4a4a"/>
-  <rect x="314" y="307" width="40" height="14" rx="7" fill="#3a82f6"/>
-  <rect x="172" y="362" width="168" height="26" rx="13" fill="#141414"/>
+  <defs>
+    <clipPath id="squircle-clip">
+      <rect x="33" y="49" width="446" height="434" rx="93"/>
+    </clipPath>
+  </defs>
+  <rect x="28" y="44" width="456" height="444" rx="98" fill="#080808"/>
+  <g clip-path="url(#squircle-clip)">
+    <path d="M 256 176 V 202" fill="none" stroke="#F4F4F4" stroke-width="10" stroke-linecap="round"/>
+    <path d="M 256 198 C 232 192, 212 206, 212 222 C 230 225, 248 214, 256 198 Z" fill="#F4F4F4"/>
+    <path d="M 256 198 C 280 192, 300 206, 300 222 C 282 225, 264 214, 256 198 Z" fill="#F4F4F4"/>
+    <path d="M 152 42 H 360 C 366 132 326 186 256 186 C 186 186 146 132 152 42 Z" fill="#F4F4F4"/>
+    <circle cx="211" cy="112" r="28.5" fill="#080808"/>
+    <circle cx="211" cy="112" r="17" fill="#F4F4F4"/>
+    <circle cx="219.5" cy="112" r="10" fill="#080808"/>
+    <circle cx="301" cy="112" r="28.5" fill="#080808"/>
+    <circle cx="301" cy="112" r="17" fill="#F4F4F4"/>
+    <circle cx="309.5" cy="112" r="10" fill="#080808"/>
+  </g>
+  <rect x="28" y="44" width="456" height="444" rx="98" fill="none" stroke="#282828" stroke-width="11"/>
+  <g transform="translate(118 66) rotate(-8)">
+    <path d="M -25 -22 C -25 -33, -12 -36, 0 -36 C 12 -36, 25 -33, 25 -21 C 26 2, 24 30, 0 32 C -24 30, -26 2, -25 -22 Z" fill="#F4F4F4" stroke="#080808" stroke-width="10" stroke-linejoin="round"/>
+  </g>
+  <g transform="translate(394 66) rotate(8) scale(-1 1)">
+    <path d="M -25 -22 C -25 -33, -12 -36, 0 -36 C 12 -36, 25 -33, 25 -21 C 26 2, 24 30, 0 32 C -24 30, -26 2, -25 -22 Z" fill="#F4F4F4" stroke="#080808" stroke-width="10" stroke-linejoin="round"/>
+  </g>
 </svg>

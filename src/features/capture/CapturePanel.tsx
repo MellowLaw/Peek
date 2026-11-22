@@ -3,10 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   AppWindow,
-  Camera,
+  Check,
   Copy,
   Crop,
   FolderOpen,
+  Mic,
+  MicOff,
   Monitor,
   Pause,
   Pipette,
@@ -16,7 +18,6 @@ import {
   Video,
 } from "lucide-react";
 import { usePreferences } from "../../stores/preferences";
-import { SettingSwitch } from "../settings/SettingsPanel";
 
 type CaptureResult =
   | { kind: "image"; path: string; thumbnail: string; width: number; height: number }
@@ -146,175 +147,211 @@ export function CapturePanel() {
   }
 
   return (
-    <section aria-label="Screenshots and recording" className="capture-panel">
-      <div className="ui-section capture-section">
-        <div className="capture-row-header">
-          <span className="status-note">Screenshot</span>
-          {monitors.length > 1 && (
-            <select
-              aria-label="Target display"
-              value={selectedMonitor}
-              onChange={(e) => setSelectedMonitor(e.target.value)}
-            >
-              <option value="">Primary display</option>
-              {monitors.map((m) => (
-                <option key={m.deviceName || m.name} value={m.deviceName}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        <div className="capture-grid">
-          <button
-            type="button"
-            className="btn"
-            disabled={busy}
-            onClick={() =>
-              void runCapture(async () => {
-                const res = await invoke<CaptureResult>("capture_full_display", {
-                  monitorName: selectedMonitor,
-                  addToShelf,
-                });
-                setLastResult(res);
-              })
-            }
-          >
-            <Monitor size={14} /> Display
-          </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={busy}
-            onClick={() =>
-              void runCapture(async () => {
-                const res = await invoke<CaptureResult>("capture_active_window", { addToShelf });
-                setLastResult(res);
-              })
-            }
-          >
-            <AppWindow size={14} /> Window
-          </button>
-          <button
-            type="button"
-            className="btn primary"
-            disabled={busy}
-            onClick={() => void beginOverlay("region")}
-          >
-            <Crop size={14} /> Region
-          </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={busy}
-            onClick={() => void beginOverlay("ocr")}
-          >
-            <ScanText size={14} /> OCR
-          </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={busy}
-            onClick={() => void beginOverlay("color")}
-          >
-            <Pipette size={14} /> Color
-          </button>
-        </div>
-
-        <SettingSwitch
-          label="Also add captures to File Shelf"
-          checked={addToShelf}
-          disabled={busy}
-          onChange={setAddToShelf}
-        />
-      </div>
-
-      <div className="ui-section capture-section">
-        <div className="capture-row-header">
-          <span className="status-note">Screen recording</span>
-          <div className="capture-header-actions">
-            {recStatus.active && (
-              <span className="rec-timer">
-                <Video size={13} /> {formatTimer(recStatus.elapsedSeconds)}
-              </span>
+    <section aria-label="Screenshots and recording" className="capture-bento">
+      {/* Capture Header & Screenshot Bento */}
+      <div className="capture-bento-section">
+        <div className="capture-bento-head">
+          <span className="bento-label">Capture</span>
+          <div className="capture-head-right">
+            {monitors.length > 1 && (
+              <select
+                className="bento-compact-select"
+                aria-label="Target display"
+                value={selectedMonitor}
+                onChange={(e) => setSelectedMonitor(e.target.value)}
+              >
+                <option value="">Primary</option>
+                {monitors.map((m) => (
+                  <option key={m.deviceName || m.name} value={m.deviceName}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
             )}
             <button
               type="button"
-              className="btn sm"
-              title="Open Videos\Peek folder"
-              onClick={() =>
-                void invoke("open_recordings_folder").catch((e) => setError(String(e)))
-              }
+              className={"capture-shelf-chip" + (addToShelf ? " is-on" : "")}
+              disabled={busy}
+              aria-pressed={addToShelf}
+              onClick={() => setAddToShelf((v) => !v)}
+              title="Automatically add screenshots & recordings to Files tab"
             >
-              <FolderOpen size={12} /> Show recordings
+              <Check size={11} />
+              <span>Save to Files</span>
             </button>
           </div>
+        </div>
+
+        <div className="capture-bento-grid">
+          <button
+            type="button"
+            className="capture-hero-tile"
+            disabled={busy}
+            onClick={() => void beginOverlay("region")}
+          >
+            <Crop size={20} />
+            <div className="capture-hero-copy">
+              <strong>Region</strong>
+              <span>{preferences.captureShortcut}</span>
+            </div>
+          </button>
+
+          <div className="capture-sub-tiles">
+            <button
+              type="button"
+              className="capture-sub-tile"
+              disabled={busy}
+              onClick={() =>
+                void runCapture(async () => {
+                  const res = await invoke<CaptureResult>("capture_full_display", {
+                    monitorName: selectedMonitor,
+                    addToShelf,
+                  });
+                  setLastResult(res);
+                })
+              }
+            >
+              <Monitor size={15} />
+              <span>Display</span>
+            </button>
+
+            <button
+              type="button"
+              className="capture-sub-tile"
+              disabled={busy}
+              onClick={() =>
+                void runCapture(async () => {
+                  const res = await invoke<CaptureResult>("capture_active_window", { addToShelf });
+                  setLastResult(res);
+                })
+              }
+            >
+              <AppWindow size={15} />
+              <span>Window</span>
+            </button>
+
+            <button
+              type="button"
+              className="capture-sub-tile"
+              disabled={busy}
+              onClick={() => void beginOverlay("ocr")}
+            >
+              <ScanText size={15} />
+              <span>OCR Text</span>
+            </button>
+
+            <button
+              type="button"
+              className="capture-sub-tile"
+              disabled={busy}
+              onClick={() => void beginOverlay("color")}
+            >
+              <Pipette size={15} />
+              <span>Color</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Screen Recording Bento Tile */}
+      <div className="bento-tile capture-rec-bento">
+        <div className="capture-bento-head">
+          <div className="capture-rec-title">
+            <span className="bento-label">Screen recording</span>
+            {recStatus.active && (
+              <span className="rec-timer">
+                <Video size={12} /> {formatTimer(recStatus.elapsedSeconds)}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn sm"
+            title="Open Videos\Peek folder"
+            onClick={() =>
+              void invoke("open_recordings_folder").catch((e) => setError(String(e)))
+            }
+          >
+            <FolderOpen size={11} /> Recordings
+          </button>
         </div>
 
         {!recStatus.ffmpegAvailable ? (
           <div className="status-note">FFmpeg not detected on this system.</div>
         ) : recStatus.active ? (
           <div className="capture-rec-controls">
-            <button type="button" className="btn" onClick={() => void togglePause()}>
-              {recStatus.paused ? <Play size={14} /> : <Pause size={14} />}
+            <button type="button" className="btn sm" onClick={() => void togglePause()}>
+              {recStatus.paused ? <Play size={13} /> : <Pause size={13} />}
               <span>{recStatus.paused ? "Resume" : "Pause"}</span>
             </button>
-            <button type="button" className="btn danger" onClick={() => void stopRec()}>
-              <Square size={14} />
+            <button type="button" className="btn danger sm" onClick={() => void stopRec()}>
+              <Square size={13} />
               <span>Stop & save</span>
             </button>
           </div>
         ) : (
-          <>
-            <div className="capture-rec-setup">
-              <select
-                aria-label="Recording mode"
-                value={recMode}
-                onChange={(e) => setRecMode(e.target.value as typeof recMode)}
-              >
-                <option value="display">Display</option>
-                <option value="window">Active window</option>
-                <option value="region">Region</option>
-              </select>
+          <div className="capture-rec-bar">
+            <div className="drag-mode-pill" role="group" aria-label="Recording target">
+              {(
+                [
+                  ["display", "Display"],
+                  ["window", "Window"],
+                  ["region", "Region"],
+                ] as const
+              ).map(([modeVal, lbl]) => (
+                <button
+                  key={modeVal}
+                  type="button"
+                  className={"drag-mode-opt" + (recMode === modeVal ? " active" : "")}
+                  onClick={() => setRecMode(modeVal)}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+
+            <div className="capture-rec-right">
+              {micDevices.length > 0 && (
+                <button
+                  type="button"
+                  className={"btn sm" + (includeMic ? " primary" : "")}
+                  aria-pressed={includeMic}
+                  title={includeMic ? "Microphone enabled" : "Include microphone"}
+                  onClick={() => setIncludeMic((v) => !v)}
+                >
+                  {includeMic ? <Mic size={12} /> : <MicOff size={12} />}
+                  <span>Mic</span>
+                </button>
+              )}
               <button
                 type="button"
-                className="btn primary"
+                className="btn primary sm"
                 disabled={busy}
                 onClick={() => void startRec()}
               >
-                <Camera size={14} /> Start recording
+                <Video size={12} /> Record
               </button>
             </div>
-            {micDevices.length > 0 && (
-              <div className="capture-mic-row">
-                <SettingSwitch
-                  label="Include microphone"
-                  checked={includeMic}
-                  disabled={busy}
-                  onChange={setIncludeMic}
-                />
-                {includeMic && (
-                  <select
-                    aria-label="Microphone device"
-                    value={selectedMic}
-                    onChange={(e) => setSelectedMic(e.target.value)}
-                  >
-                    {micDevices.map((d) => (
-                      <option key={d} value={d}>
-                        {d}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            )}
-          </>
+          </div>
+        )}
+
+        {!recStatus.active && includeMic && micDevices.length > 1 && (
+          <select
+            aria-label="Microphone device"
+            value={selectedMic}
+            onChange={(e) => setSelectedMic(e.target.value)}
+          >
+            {micDevices.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
         )}
       </div>
 
       {lastResult && (
-        <div className="ui-section capture-result">
+        <div className="bento-tile capture-result">
           {lastResult.kind === "image" && (
             <div className="capture-image-preview">
               <img src={lastResult.thumbnail} alt="Captured screenshot" />

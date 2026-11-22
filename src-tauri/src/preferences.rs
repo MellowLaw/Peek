@@ -4,11 +4,12 @@ use std::path::Path;
 use std::sync::Mutex;
 use tauri::Manager;
 
-pub const ALL_PANELS: [&str; 11] = [
+pub const ALL_PANELS: [&str; 12] = [
     "music",
     "ai",
     "files",
     "capture",
+    "camera",
     "controls",
     "clipboard",
     "timer",
@@ -88,6 +89,8 @@ pub struct Preferences {
     pub toggle_shortcut: String,
     pub capture_shortcut: String,
     pub lyrics_enabled: bool,
+    #[serde(default = "default_true")]
+    pub idle_lyrics_enabled: bool,
     pub autostart: bool,
     pub clipboard_history_enabled: bool,
     pub notifications_enabled: bool,
@@ -101,6 +104,12 @@ pub struct Preferences {
     pub pinned_repos: Vec<String>,
     pub pinned_ai_providers: Vec<String>,
     pub ai_budgets: ProviderBudgets,
+    #[serde(default)]
+    pub camera_panel_added: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Preferences {
@@ -118,6 +127,7 @@ impl Default for Preferences {
             toggle_shortcut: "Ctrl+Alt+Space".into(),
             capture_shortcut: "Ctrl+Alt+S".into(),
             lyrics_enabled: true,
+            idle_lyrics_enabled: true,
             autostart: false,
             clipboard_history_enabled: false,
             notifications_enabled: false,
@@ -131,6 +141,7 @@ impl Default for Preferences {
             pinned_repos: Vec::new(),
             pinned_ai_providers: Vec::new(),
             ai_budgets: ProviderBudgets::default(),
+            camera_panel_added: true,
         }
     }
 }
@@ -165,6 +176,18 @@ impl Preferences {
             panels = ALL_PANELS.iter().map(|s| (*s).to_string()).collect();
         } else if !panels.iter().any(|p| p == "settings") {
             panels.push("settings".to_string());
+        }
+        if !self.camera_panel_added {
+            if !panels.iter().any(|p| p == "camera") {
+                if let Some(cap_idx) = panels.iter().position(|p| p == "capture") {
+                    panels.insert(cap_idx + 1, "camera".to_string());
+                } else if let Some(set_idx) = panels.iter().position(|p| p == "settings") {
+                    panels.insert(set_idx, "camera".to_string());
+                } else {
+                    panels.push("camera".to_string());
+                }
+            }
+            self.camera_panel_added = true;
         }
         self.enabled_panels = panels;
         let mut pinned_ai = Vec::new();
@@ -358,14 +381,22 @@ mod tests {
         assert!(matches!(normalized.accent, Accent::Neutral));
         assert_eq!(normalized.hover_delay_ms, 80);
         assert_eq!(normalized.toggle_shortcut, "Ctrl+Alt+Space");
-        assert_eq!(normalized.enabled_panels, vec!["music", "settings"]);
+        assert!(normalized.idle_lyrics_enabled);
+        assert_eq!(
+            normalized.enabled_panels,
+            vec!["music", "camera", "settings"]
+        );
+        assert!(normalized.camera_panel_added);
 
         let legacy_tools: Preferences =
-            serde_json::from_str(r#"{"enabledPanels":["music","tools","settings"]}"#).unwrap();
+            serde_json::from_str(r#"{"enabledPanels":["music","capture","tools","settings"]}"#)
+                .unwrap();
         assert_eq!(
             legacy_tools.normalize().enabled_panels,
             vec![
                 "music",
+                "capture",
+                "camera",
                 "clipboard",
                 "timer",
                 "notes",

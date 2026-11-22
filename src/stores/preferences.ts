@@ -7,6 +7,7 @@ export const DEFAULT_PANELS: PanelId[] = [
   "ai",
   "files",
   "capture",
+  "camera",
   "controls",
   "clipboard",
   "timer",
@@ -29,6 +30,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   toggleShortcut: "Ctrl+Alt+Space",
   captureShortcut: "Ctrl+Alt+S",
   lyricsEnabled: true,
+  idleLyricsEnabled: true,
   autostart: false,
   clipboardHistoryEnabled: false,
   notificationsEnabled: false,
@@ -49,6 +51,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
     codex5hTokens: 25_000_000,
     codexWeeklyTokens: 150_000_000,
   },
+  cameraPanelAdded: true,
 };
 
 const DEFAULT_SHORTCUTS: ShortcutStates = {

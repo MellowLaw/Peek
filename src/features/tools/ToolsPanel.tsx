@@ -1,13 +1,25 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  Bell,
+  Bot,
+  Camera,
   Clipboard,
+  Code2,
   Copy,
+  Crop,
+  Files,
+  Music2,
+  PictureInPicture2,
   Pin,
   Plus,
   RefreshCw,
-  Rocket,
+  ScanLine,
+  ScanText,
+  Search,
+  Settings2,
+  SlidersHorizontal,
   StickyNote,
   Timer,
   Trash2,
@@ -53,6 +65,22 @@ function formatMmSs(secs: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+function appMonogram(name: string): string {
+  const words = name.trim().split(/[\s\-_]+/).filter(Boolean);
+  if (words.length >= 2) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+  return name.trim().slice(0, 2).toUpperCase() || "AP";
+}
+
+function relativeShort(ms: number): string {
+  const diff = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (diff < 60) return "now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  return `${Math.floor(diff / 86400)}d`;
+}
+
 export function ToolsPanel({
   section,
   onNavigate,
@@ -80,6 +108,9 @@ export function ToolsPanel({
   const [timerLabel, setTimerLabel] = useState("Focus");
   const [remTitle, setRemTitle] = useState("");
   const [remMins, setRemMins] = useState(15);
+  const [localClock, setLocalClock] = useState(() =>
+    new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+  );
 
   // Notes & Snippets state
   const [notesData, setNotesData] = useState<NotesStoreData>({ notes: [], snippets: [] });
@@ -91,6 +122,8 @@ export function ToolsPanel({
 
   // Launcher state
   const [apps, setApps] = useState<InstalledApp[]>([]);
+  const [appIcons, setAppIcons] = useState<Record<string, string>>({});
+  const requestedIconsRef = useRef<Set<string>>(new Set());
   const [launchQuery, setLaunchQuery] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -101,6 +134,7 @@ export function ToolsPanel({
   };
 
   const loadLauncher = useCallback(async () => {
+    requestedIconsRef.current.clear();
     const list = await invoke<InstalledApp[]>("scan_installed_apps").catch(() => []);
     setApps(list);
   }, []);
@@ -121,11 +155,24 @@ export function ToolsPanel({
       setClipItems(payload),
     );
     const subTimer = listen<TimerSnapshot>("tools-timer", ({ payload }) => setTimer(payload));
+    const subNotes = listen<NotesStoreData>("notes-updated", ({ payload }) =>
+      setNotesData(payload),
+    );
     return () => {
       void subClip.then((u) => u()).catch(() => {});
       void subTimer.then((u) => u()).catch(() => {});
+      void subNotes.then((u) => u()).catch(() => {});
     };
   }, [loadLauncher]);
+
+  useEffect(() => {
+    if (subtab !== "timer") return;
+    const tick = () =>
+      setLocalClock(new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+    tick();
+    const id = setInterval(tick, 15000);
+    return () => clearInterval(id);
+  }, [subtab]);
 
   const filteredClip = useMemo(() => {
     const q = clipFilter.trim().toLowerCase();
@@ -139,14 +186,16 @@ export function ToolsPanel({
     });
   }, [clipItems, clipFilter]);
 
-  const peekActions: { label: string; run: () => void }[] = useMemo(
+  const peekActions = useMemo(
     () => [
-      { label: "Peek: Music", run: () => onNavigate("music") },
-      { label: "Peek: AI Monitor", run: () => onNavigate("ai") },
-      { label: "Peek: File Shelf", run: () => onNavigate("files") },
-      { label: "Peek: Capture", run: () => onNavigate("capture") },
+      { id: "music", title: "Music", subtitle: "Panel", icon: Music2, run: () => onNavigate("music") },
+      { id: "ai", title: "AI Usage", subtitle: "Panel", icon: Bot, run: () => onNavigate("ai") },
+      { id: "files", title: "Files", subtitle: "Shelf", icon: Files, run: () => onNavigate("files") },
       {
-        label: "Peek: Region Screenshot",
+        id: "region",
+        title: "Region",
+        subtitle: "Capture",
+        icon: Crop,
         run: () =>
           void invoke("begin_screen_overlay", {
             mode: "region",
@@ -156,7 +205,10 @@ export function ToolsPanel({
           }),
       },
       {
-        label: "Peek: OCR Screen Region",
+        id: "ocr",
+        title: "OCR Text",
+        subtitle: "Capture",
+        icon: ScanText,
         run: () =>
           void invoke("begin_screen_overlay", {
             mode: "ocr",
@@ -165,19 +217,31 @@ export function ToolsPanel({
             micDevice: "",
           }),
       },
-      { label: "Peek: System Controls", run: () => onNavigate("controls") },
-      { label: "Peek: Clipboard History", run: () => onNavigate("clipboard") },
-      { label: "Peek: Focus Timer & Reminders", run: () => onNavigate("timer") },
-      { label: "Peek: Notes & Snippets", run: () => onNavigate("notes") },
-      { label: "Peek: Alerts", run: () => onNavigate("notifications") },
-      { label: "Peek: Settings", run: () => onNavigate("settings") },
+      {
+        id: "controls",
+        title: "Controls",
+        subtitle: "Panel",
+        icon: SlidersHorizontal,
+        run: () => onNavigate("controls"),
+      },
+      { id: "capture", title: "Capture", subtitle: "Panel", icon: ScanLine, run: () => onNavigate("capture") },
+      { id: "camera", title: "Toy Cam", subtitle: "Panel", icon: Camera, run: () => onNavigate("camera") },
+      { id: "clipboard", title: "Clipboard", subtitle: "Panel", icon: Clipboard, run: () => onNavigate("clipboard") },
+      { id: "timer", title: "Timer", subtitle: "Panel", icon: Timer, run: () => onNavigate("timer") },
+      { id: "notes", title: "Notes", subtitle: "Panel", icon: StickyNote, run: () => onNavigate("notes") },
+      { id: "alerts", title: "Alerts", subtitle: "Panel", icon: Bell, run: () => onNavigate("notifications") },
+      { id: "settings", title: "Settings", subtitle: "Panel", icon: Settings2, run: () => onNavigate("settings") },
     ],
     [onNavigate],
   );
 
   const filteredActions = useMemo(() => {
     const q = launchQuery.trim().toLowerCase();
-    return q ? peekActions.filter((a) => a.label.toLowerCase().includes(q)) : peekActions.slice(0, 4);
+    return q
+      ? peekActions.filter(
+          (a) => a.title.toLowerCase().includes(q) || a.subtitle.toLowerCase().includes(q),
+        )
+      : peekActions.slice(0, 6);
   }, [peekActions, launchQuery]);
 
   const filteredApps = useMemo(() => {
@@ -185,6 +249,24 @@ export function ToolsPanel({
     const list = q ? apps.filter((a) => a.name.toLowerCase().includes(q)) : apps;
     return list.slice(0, 24);
   }, [apps, launchQuery]);
+
+  useEffect(() => {
+    if (subtab !== "launcher" || filteredApps.length === 0) return;
+    const missing = filteredApps
+      .map((a) => a.path)
+      .filter((p) => !requestedIconsRef.current.has(p));
+    if (missing.length === 0) return;
+    for (const p of missing) {
+      requestedIconsRef.current.add(p);
+    }
+    void invoke<Record<string, string>>("get_app_icons", { paths: missing })
+      .then((res) => {
+        if (Object.keys(res).length > 0) {
+          setAppIcons((prev) => ({ ...prev, ...res }));
+        }
+      })
+      .catch(() => {});
+  }, [subtab, filteredApps]);
 
   return (
     <section aria-label="Productivity tools" className="tools-panel">
@@ -325,316 +407,531 @@ export function ToolsPanel({
         </div>
       )}
 
-      {subtab === "timer" && (
-        <div className="tools-stack">
-          <div className="ui-section timer-card">
-            <div className="timer-display">
-              <Timer size={18} />
-              <strong>{formatMmSs(timer.remainingSeconds)}</strong>
-              <span className="status-note">{timer.label}</span>
+      {subtab === "timer" && (() => {
+        const totalSec = Math.max(1, timer.totalSeconds || customMins * 60);
+        const pctRatio = Math.max(0, Math.min(1, timer.remainingSeconds / totalSec));
+        const r = 44;
+        const circ = 2 * Math.PI * r;
+        const offset = circ * (1 - pctRatio);
+
+        return (
+          <div className="timer-bento">
+            <div className="timer-top-grid">
+              {/* Left Hero: Circular Dial Readout */}
+              <div className="bento-tile timer-dial-tile">
+                <div className="bento-tile-head">
+                  <span className="bento-label">Timer</span>
+                  <span className="timer-clock-readout">{localClock}</span>
+                </div>
+
+                <div className="timer-ring-wrap">
+                  <svg viewBox="0 0 112 112" width="112" height="112" aria-hidden="true">
+                    {Array.from({ length: 24 }, (_, idx) => (
+                      <rect
+                        key={idx}
+                        x="55.2"
+                        y="2.5"
+                        width="1.6"
+                        height="4.5"
+                        rx="0.8"
+                        fill="#262626"
+                        transform={`rotate(${idx * 15} 56 56)`}
+                      />
+                    ))}
+                    <circle
+                      cx="56"
+                      cy="56"
+                      r={r}
+                      fill="none"
+                      stroke="#222222"
+                      strokeWidth="4.5"
+                    />
+                    <circle
+                      cx="56"
+                      cy="56"
+                      r={r}
+                      fill="none"
+                      stroke={timer.paused ? "#8f8f8f" : "#f4f4f4"}
+                      strokeWidth="4.5"
+                      strokeLinecap="round"
+                      strokeDasharray={circ}
+                      strokeDashoffset={offset}
+                      transform="rotate(-90 56 56)"
+                      style={{ transition: "stroke-dashoffset 280ms ease" }}
+                    />
+                  </svg>
+                  <div className="timer-ring-center">
+                    <strong>{formatMmSs(timer.remainingSeconds)}</strong>
+                    <span>{timer.paused ? "Paused" : timer.label}</span>
+                  </div>
+                </div>
+
+                <div className="timer-hero-actions">
+                  {!timer.running ? (
+                    <button
+                      type="button"
+                      className="btn primary sm"
+                      onClick={() =>
+                        void invoke<TimerSnapshot>("start_timer", {
+                          label: timerLabel,
+                          durationSeconds: customMins * 60,
+                        }).then(setTimer)
+                      }
+                    >
+                      <SolidPlayIcon size={12} /> Start
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="btn primary sm"
+                        aria-label={timer.paused ? "Resume timer" : "Pause timer"}
+                        onClick={() =>
+                          void invoke<TimerSnapshot>(
+                            timer.paused ? "resume_timer" : "pause_timer",
+                          ).then(setTimer)
+                        }
+                      >
+                        {timer.paused ? <SolidPlayIcon size={12} /> : <SolidPauseIcon size={12} />}
+                        <span>{timer.paused ? "Resume" : "Pause"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn sm"
+                        aria-label="Stop timer"
+                        title="Stop"
+                        onClick={() => void invoke<TimerSnapshot>("reset_timer").then(setTimer)}
+                      >
+                        <SolidStopIcon size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        className="btn sm"
+                        aria-label="Restart timer"
+                        title="Restart"
+                        onClick={() => void invoke<TimerSnapshot>("restart_timer").then(setTimer)}
+                      >
+                        <SolidRepeatIcon size={12} />
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Right Stack: Presets + Custom */}
+              <div className="timer-right-stack">
+                <div className="timer-presets-grid">
+                  {(
+                    [
+                      ["Focus", 25 * 60],
+                      ["Break", 5 * 60],
+                      ["Long", 15 * 60],
+                      ["Sprint", 45 * 60],
+                    ] as const
+                  ).map(([lbl, sec]) => (
+                    <button
+                      key={lbl}
+                      type="button"
+                      className={
+                        "timer-preset-tile" +
+                        (timer.running && timer.label === lbl && timer.totalSeconds === sec
+                          ? " is-active"
+                          : "")
+                      }
+                      onClick={() => {
+                        setTimerLabel(lbl);
+                        setCustomMins(sec / 60);
+                        void invoke<TimerSnapshot>("start_timer", {
+                          label: lbl,
+                          durationSeconds: sec,
+                        }).then(setTimer);
+                      }}
+                    >
+                      <strong>{lbl}</strong>
+                      <span>{sec / 60}m</span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="bento-tile timer-custom-tile">
+                  <span className="bento-label">Custom</span>
+                  <input
+                    type="text"
+                    aria-label="Timer label"
+                    value={timerLabel}
+                    onChange={(e) => setTimerLabel(e.target.value)}
+                    placeholder="Label"
+                  />
+                  <div className="timer-custom-foot">
+                    <NumberStepper
+                      ariaLabel="Timer minutes"
+                      min={1}
+                      max={240}
+                      suffix="m"
+                      value={customMins}
+                      onChange={setCustomMins}
+                    />
+                    <button
+                      type="button"
+                      className="btn sm primary"
+                      onClick={() =>
+                        void invoke<TimerSnapshot>("start_timer", {
+                          label: timerLabel,
+                          durationSeconds: customMins * 60,
+                        }).then(setTimer)
+                      }
+                    >
+                      <SolidPlayIcon size={11} /> Go
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div className="tools-row">
-              {(
-                [
-                  ["Focus", 25 * 60],
-                  ["Break", 5 * 60],
-                  ["Long", 15 * 60],
-                ] as const
-              ).map(([lbl, sec]) => (
-                <button
-                  key={lbl}
-                  type="button"
-                  className="btn sm"
-                  onClick={() =>
-                    void invoke<TimerSnapshot>("start_timer", {
-                      label: lbl,
-                      durationSeconds: sec,
-                    }).then(setTimer)
-                  }
-                >
-                  {lbl} {sec / 60}m
-                </button>
-              ))}
-            </div>
-            <div className="tools-row">
-              <input
-                type="text"
-                aria-label="Timer label"
-                value={timerLabel}
-                onChange={(e) => setTimerLabel(e.target.value)}
-                style={{ flex: 1 }}
-              />
-              <NumberStepper
-                ariaLabel="Timer minutes"
-                min={1}
-                max={240}
-                suffix="m"
-                value={customMins}
-                onChange={setCustomMins}
-              />
-              {!timer.running ? (
+
+            {/* Bottom Reminders Bento */}
+            <div className="bento-tile timer-reminders-tile">
+              <div className="bento-tile-head">
+                <span className="bento-label">Reminders</span>
+                {timer.reminders.length > 0 && (
+                  <span className="timer-count-pill">{timer.reminders.length}</span>
+                )}
+              </div>
+              <div className="tools-row">
+                <input
+                  type="text"
+                  placeholder="Remind me to…"
+                  value={remTitle}
+                  onChange={(e) => setRemTitle(e.target.value)}
+                  style={{ flex: 1, minWidth: 0 }}
+                />
+                <NumberStepper
+                  ariaLabel="Minutes until reminder"
+                  min={1}
+                  max={1440}
+                  suffix="m"
+                  value={remMins}
+                  onChange={setRemMins}
+                />
                 <button
                   type="button"
                   className="btn primary sm"
                   onClick={() =>
-                    void invoke<TimerSnapshot>("start_timer", {
-                      label: timerLabel,
-                      durationSeconds: customMins * 60,
-                    }).then(setTimer)
+                    void invoke<TimerSnapshot>("add_reminder", {
+                      title: remTitle,
+                      minutes: remMins,
+                    })
+                      .then((s) => {
+                        setTimer(s);
+                        setRemTitle("");
+                      })
+                      .catch((e) => setError(String(e)))
                   }
                 >
-                  <SolidPlayIcon size={12} /> Start
+                  <Plus size={12} /> Add
                 </button>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    className="btn sm"
-                    aria-label={timer.paused ? "Resume timer" : "Pause timer"}
-                    title={timer.paused ? "Resume" : "Pause"}
-                    onClick={() =>
-                      void invoke<TimerSnapshot>(
-                        timer.paused ? "resume_timer" : "pause_timer",
-                      ).then(setTimer)
-                    }
-                  >
-                    {timer.paused ? <SolidPlayIcon size={12} /> : <SolidPauseIcon size={12} />}
-                    {timer.paused ? "Resume" : "Pause"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn sm"
-                    aria-label="Stop timer"
-                    title="Stop"
-                    onClick={() => void invoke<TimerSnapshot>("reset_timer").then(setTimer)}
-                  >
-                    <SolidStopIcon size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    className="btn sm"
-                    aria-label="Restart timer"
-                    title="Restart"
-                    onClick={() => void invoke<TimerSnapshot>("restart_timer").then(setTimer)}
-                  >
-                    <SolidRepeatIcon size={12} />
-                  </button>
-                </>
+              </div>
+              {timer.reminders.length > 0 && (
+                <div className="reminder-list">
+                  {timer.reminders.map((r) => (
+                    <div key={r.id} className="reminder-row">
+                      <span className="reminder-title truncate">{r.title}</span>
+                      <span className="reminder-due">
+                        {new Date(r.dueMs).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </span>
+                      <button
+                        type="button"
+                        className="notif-dismiss-btn"
+                        aria-label="Remove reminder"
+                        onClick={() =>
+                          void invoke<TimerSnapshot>("remove_reminder", { id: r.id }).then(setTimer)
+                        }
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           </div>
-
-          <div className="ui-section tools-stack">
-            <span className="status-note">Reminders</span>
-            <div className="tools-row">
-              <input
-                type="text"
-                placeholder="Remind me to…"
-                value={remTitle}
-                onChange={(e) => setRemTitle(e.target.value)}
-                style={{ flex: 1 }}
-              />
-              <NumberStepper
-                ariaLabel="Minutes until reminder"
-                min={1}
-                max={1440}
-                suffix="m"
-                value={remMins}
-                onChange={setRemMins}
-              />
-              <button
-                type="button"
-                className="btn primary sm"
-                onClick={() =>
-                  void invoke<TimerSnapshot>("add_reminder", {
-                    title: remTitle,
-                    minutes: remMins,
-                  })
-                    .then((s) => {
-                      setTimer(s);
-                      setRemTitle("");
-                    })
-                    .catch((e) => setError(String(e)))
-                }
-              >
-                <Plus size={12} /> Add
-              </button>
-            </div>
-            {timer.reminders.map((r) => (
-              <div key={r.id} className="tools-row">
-                <span className="status-note" style={{ flex: 1 }}>
-                  {r.title} · {new Date(r.dueMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </span>
-                <button
-                  type="button"
-                  className="btn sm"
-                  aria-label="Remove reminder"
-                  onClick={() =>
-                    void invoke<TimerSnapshot>("remove_reminder", { id: r.id }).then(setTimer)
-                  }
-                >
-                  <Trash2 size={11} />
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {subtab === "notes" && (
-        <div className="tools-stack">
-          <div className="tools-row">
+        <div className="notes-bento">
+          <div className="notes-bento-head">
+            <div className="drag-mode-pill" role="tablist" aria-label="Notes and snippets">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={noteMode === "notes"}
+                className={"drag-mode-opt" + (noteMode === "notes" ? " active" : "")}
+                onClick={() => setNoteMode("notes")}
+              >
+                Notes ({notesData.notes.length})
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={noteMode === "snippets"}
+                className={"drag-mode-opt" + (noteMode === "snippets" ? " active" : "")}
+                onClick={() => setNoteMode("snippets")}
+              >
+                Snippets ({notesData.snippets.length})
+              </button>
+            </div>
+
             <button
               type="button"
-              className={"btn sm" + (noteMode === "notes" ? " primary" : "")}
-              onClick={() => setNoteMode("notes")}
+              className="btn sm"
+              title="Open a floating sticky note window"
+              onClick={() =>
+                void invoke("open_floating_note", { id: null }).catch((e) =>
+                  setError(String(e)),
+                )
+              }
             >
-              Notes ({notesData.notes.length})
-            </button>
-            <button
-              type="button"
-              className={"btn sm" + (noteMode === "snippets" ? " primary" : "")}
-              onClick={() => setNoteMode("snippets")}
-            >
-              Snippets ({notesData.snippets.length})
+              <PictureInPicture2 size={12} />
+              <span>Float note</span>
             </button>
           </div>
 
           {noteMode === "notes" ? (
             <>
-              <div className="ui-section tools-stack">
+              <div className="bento-tile notes-composer-tile">
                 <input
                   type="text"
+                  className="notes-composer-title"
+                  aria-label="Note title"
                   placeholder="Title"
                   value={noteTitle}
                   onChange={(e) => setNoteTitle(e.target.value)}
                 />
                 <textarea
-                  rows={2}
+                  className="notes-composer-body"
+                  rows={3}
+                  aria-label="Note content"
                   placeholder="Write a quick note…"
                   value={noteBody}
                   onChange={(e) => setNoteBody(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (
+                      (e.ctrlKey || e.metaKey) &&
+                      e.key === "Enter" &&
+                      (noteTitle.trim() || noteBody.trim())
+                    ) {
+                      e.preventDefault();
+                      void invoke<NotesStoreData>("save_note", {
+                        id: null,
+                        title: noteTitle,
+                        body: noteBody,
+                      }).then((d) => {
+                        setNotesData(d);
+                        setNoteTitle("");
+                        setNoteBody("");
+                      });
+                    }
+                  }}
                 />
-                <button
-                  type="button"
-                  className="btn primary sm"
-                  disabled={!noteTitle.trim() && !noteBody.trim()}
-                  onClick={() =>
-                    void invoke<NotesStoreData>("save_note", {
-                      id: null,
-                      title: noteTitle,
-                      body: noteBody,
-                    }).then((d) => {
-                      setNotesData(d);
-                      setNoteTitle("");
-                      setNoteBody("");
-                    })
-                  }
-                >
-                  <StickyNote size={12} /> Save note
-                </button>
-              </div>
-              {notesData.notes.map((n) => (
-                <div key={n.id} className="ui-row clip-item">
-                  <div className="note-text">
-                    <strong>{n.title}</strong>
-                    {n.body && <span className="status-note">{n.body}</span>}
-                  </div>
-                  <div className="clip-actions">
-                    <button
-                      type="button"
-                      className="btn sm"
-                      aria-label="Copy note"
-                      onClick={() =>
-                        void invoke("copy_tool_text", { text: n.body || n.title }).then(() =>
-                          flash("Copied"),
-                        )
-                      }
-                    >
-                      <Copy size={11} />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn sm"
-                      aria-label="Delete note"
-                      onClick={() =>
-                        void invoke<NotesStoreData>("delete_note", { id: n.id }).then(setNotesData)
-                      }
-                    >
-                      <Trash2 size={11} />
-                    </button>
-                  </div>
+                <div className="notes-composer-foot">
+                  <span className="notes-hint">Ctrl+Enter to save</span>
+                  <button
+                    type="button"
+                    className="btn primary sm"
+                    disabled={!noteTitle.trim() && !noteBody.trim()}
+                    onClick={() =>
+                      void invoke<NotesStoreData>("save_note", {
+                        id: null,
+                        title: noteTitle,
+                        body: noteBody,
+                      }).then((d) => {
+                        setNotesData(d);
+                        setNoteTitle("");
+                        setNoteBody("");
+                      })
+                    }
+                  >
+                    <StickyNote size={12} />
+                    <span>Save note</span>
+                  </button>
                 </div>
-              ))}
+              </div>
+
+              {notesData.notes.length === 0 ? (
+                <div className="empty-panel notes-empty-bento">
+                  <StickyNote size={22} strokeWidth={1.5} />
+                  <span>No saved notes</span>
+                </div>
+              ) : (
+                <div className="notes-cards-grid">
+                  {notesData.notes.map((n) => (
+                    <div key={n.id} className="note-bento-card">
+                      <div className="note-card-head">
+                        <strong title={n.title}>{n.title}</strong>
+                        <span className="note-card-time">{relativeShort(n.updatedAtMs)}</span>
+                      </div>
+                      {n.body && <p className="note-card-body">{n.body}</p>}
+                      <div className="note-card-actions">
+                        <button
+                          type="button"
+                          className="shelf-act-btn"
+                          title="Float sticky note"
+                          aria-label="Float note"
+                          onClick={() =>
+                            void invoke("open_floating_note", { id: n.id }).catch((e) =>
+                              setError(String(e)),
+                            )
+                          }
+                        >
+                          <PictureInPicture2 size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          className="shelf-act-btn"
+                          title="Copy note"
+                          aria-label="Copy note"
+                          onClick={() =>
+                            void invoke("copy_tool_text", { text: n.body || n.title }).then(() =>
+                              flash("Copied"),
+                            )
+                          }
+                        >
+                          <Copy size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          className="shelf-act-btn"
+                          title="Delete note"
+                          aria-label="Delete note"
+                          onClick={() =>
+                            void invoke<NotesStoreData>("delete_note", { id: n.id }).then(
+                              setNotesData,
+                            )
+                          }
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           ) : (
             <>
-              <div className="ui-section tools-stack">
+              <div className="bento-tile notes-composer-tile">
                 <input
                   type="text"
+                  className="notes-composer-title"
+                  aria-label="Snippet label"
                   placeholder="Snippet label"
                   value={snipTitle}
                   onChange={(e) => setSnipTitle(e.target.value)}
                 />
                 <textarea
-                  rows={2}
+                  className="notes-composer-body is-mono"
+                  rows={3}
+                  aria-label="Snippet content"
                   placeholder="Reusable text or command…"
                   value={snipContent}
                   onChange={(e) => setSnipContent(e.target.value)}
+                  onKeyDown={(e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && snipContent.trim()) {
+                      e.preventDefault();
+                      void invoke<NotesStoreData>("save_snippet", {
+                        id: null,
+                        title: snipTitle,
+                        content: snipContent,
+                      }).then((d) => {
+                        setNotesData(d);
+                        setSnipTitle("");
+                        setSnipContent("");
+                      });
+                    }
+                  }}
                 />
-                <button
-                  type="button"
-                  className="btn primary sm"
-                  disabled={!snipContent.trim()}
-                  onClick={() =>
-                    void invoke<NotesStoreData>("save_snippet", {
-                      id: null,
-                      title: snipTitle,
-                      content: snipContent,
-                    }).then((d) => {
-                      setNotesData(d);
-                      setSnipTitle("");
-                      setSnipContent("");
-                    })
-                  }
-                >
-                  <Plus size={12} /> Add snippet
-                </button>
+                <div className="notes-composer-foot">
+                  <span className="notes-hint">Ctrl+Enter to add</span>
+                  <button
+                    type="button"
+                    className="btn primary sm"
+                    disabled={!snipContent.trim()}
+                    onClick={() =>
+                      void invoke<NotesStoreData>("save_snippet", {
+                        id: null,
+                        title: snipTitle,
+                        content: snipContent,
+                      }).then((d) => {
+                        setNotesData(d);
+                        setSnipTitle("");
+                        setSnipContent("");
+                      })
+                    }
+                  >
+                    <Plus size={12} />
+                    <span>Add snippet</span>
+                  </button>
+                </div>
               </div>
-              {notesData.snippets.map((s) => (
-                <div key={s.id} className="ui-row clip-item">
-                  <div className="note-text">
-                    <strong>{s.title}</strong>
-                    <span className="status-note">{s.content}</span>
-                  </div>
-                  <div className="clip-actions">
-                    <button
-                      type="button"
-                      className="btn sm primary"
-                      aria-label="Copy snippet"
-                      onClick={() =>
+
+              {notesData.snippets.length === 0 ? (
+                <div className="empty-panel notes-empty-bento">
+                  <Code2 size={22} strokeWidth={1.5} />
+                  <span>No saved snippets</span>
+                </div>
+              ) : (
+                <div className="notes-cards-grid">
+                  {notesData.snippets.map((s) => (
+                    <div
+                      key={s.id}
+                      className="note-bento-card is-snippet"
+                      title="Click to copy snippet"
+                      onClick={(e) => {
+                        if ((e.target as HTMLElement).closest("button")) return;
                         void invoke("copy_tool_text", { text: s.content }).then(() =>
                           flash("Copied"),
-                        )
-                      }
+                        );
+                      }}
                     >
-                      <Copy size={11} />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn sm"
-                      aria-label="Delete snippet"
-                      onClick={() =>
-                        void invoke<NotesStoreData>("delete_snippet", { id: s.id }).then(
-                          setNotesData,
-                        )
-                      }
-                    >
-                      <Trash2 size={11} />
-                    </button>
-                  </div>
+                      <div className="note-card-head">
+                        <strong title={s.title}>{s.title || "Snippet"}</strong>
+                      </div>
+                      <p className="note-card-body is-mono">{s.content}</p>
+                      <div className="note-card-actions">
+                        <button
+                          type="button"
+                          className="shelf-act-btn primary"
+                          title="Copy snippet"
+                          aria-label="Copy snippet"
+                          onClick={() =>
+                            void invoke("copy_tool_text", { text: s.content }).then(() =>
+                              flash("Copied"),
+                            )
+                          }
+                        >
+                          <Copy size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          className="shelf-act-btn"
+                          title="Delete snippet"
+                          aria-label="Delete snippet"
+                          onClick={() =>
+                            void invoke<NotesStoreData>("delete_snippet", { id: s.id }).then(
+                              setNotesData,
+                            )
+                          }
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </>
           )}
         </div>
@@ -642,48 +939,96 @@ export function ToolsPanel({
 
       {subtab === "launcher" && (
         <div className="tools-stack">
-          <div className="tools-row">
+          <div className="launcher-search-bar">
+            <Search size={13} className="launcher-search-ico" />
             <input
               type="text"
-              placeholder="Search apps & Peek commands (Ctrl+K)…"
+              placeholder="Search apps & Peek actions (Ctrl+K)…"
               value={launchQuery}
               onChange={(e) => setLaunchQuery(e.target.value)}
-              style={{ flex: 1 }}
               autoFocus
             />
+            <span className="launcher-count-pill">{apps.length}</span>
             <button
               type="button"
               className="btn sm"
               aria-label="Refresh apps"
+              title="Refresh installed apps"
               onClick={() => void loadLauncher()}
             >
               <RefreshCw size={12} />
             </button>
           </div>
-          <div className="launcher-list">
-            {filteredActions.map((act) => (
-              <button
-                key={act.label}
-                type="button"
-                className="ui-row launch-row"
-                onClick={act.run}
-              >
-                <span>{act.label}</span>
-              </button>
-            ))}
-            {filteredApps.map((app) => (
-              <button
-                key={app.path}
-                type="button"
-                className="ui-row launch-row"
-                onClick={() =>
-                  void invoke("launch_app", { path: app.path }).catch((e) => setError(String(e)))
-                }
-              >
-                <Rocket size={12} />
-                <span className="truncate">{app.name}</span>
-              </button>
-            ))}
+
+          {filteredActions.length > 0 && (
+            <div className="launcher-section">
+              <div className="launcher-section-head">
+                <span className="bento-label">Peek Actions</span>
+              </div>
+              <div className="launcher-actions-grid">
+                {filteredActions.map((act) => {
+                  const Icon = act.icon;
+                  return (
+                    <button
+                      key={act.id}
+                      type="button"
+                      className="launcher-action-tile"
+                      onClick={act.run}
+                    >
+                      <Icon size={15} strokeWidth={1.85} />
+                      <span className="launcher-action-copy">
+                        <strong>{act.title}</strong>
+                        <span>{act.subtitle}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div className="launcher-section">
+            <div className="launcher-section-head">
+              <span className="bento-label">Apps</span>
+            </div>
+            {filteredApps.length === 0 ? (
+              <div className="empty-panel">
+                <span>No matching apps</span>
+              </div>
+            ) : (
+              <div className="launcher-apps-grid">
+                {filteredApps.map((app) => {
+                  const iconUrl = appIcons[app.path];
+                  return (
+                    <button
+                      key={app.path}
+                      type="button"
+                      className="launcher-app-tile"
+                      title={app.name}
+                      onClick={() =>
+                        void invoke("launch_app", { path: app.path }).catch((e) =>
+                          setError(String(e)),
+                        )
+                      }
+                    >
+                      {iconUrl ? (
+                        <img
+                          src={iconUrl}
+                          alt=""
+                          className="launcher-app-icon"
+                          draggable={false}
+                        />
+                      ) : (
+                        <span className="launcher-app-monogram" aria-hidden="true">
+                          {appMonogram(app.name)}
+                        </span>
+                      )}
+                      <span className="launcher-app-name">{app.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}

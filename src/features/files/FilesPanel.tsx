@@ -14,6 +14,8 @@ import {
   Pencil,
   Plus,
   QrCode,
+  ShieldCheck,
+  Smartphone,
   Trash2,
   X,
 } from "lucide-react";
@@ -35,6 +37,11 @@ type QrTransferInfo = {
   url: string;
   qrDataUrl: string;
   expiresInSeconds: number;
+  mode: "send" | "receive";
+  saveDir?: string | null;
+  receivedCount: number;
+  lastReceived?: string | null;
+  firewallBlocked?: boolean;
 };
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif"]);
@@ -65,6 +72,7 @@ export function FilesPanel({
   const [qrInfo, setQrInfo] = useState<QrTransferInfo | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const dragCleanup = useRef<(() => void) | null>(null);
+  const prevReceivedCountRef = useRef(0);
 
   const load = useCallback(async () => {
     try {
@@ -77,12 +85,36 @@ export function FilesPanel({
 
   useEffect(() => {
     void load();
+    void invoke<QrTransferInfo | null>("get_qr_transfer")
+      .then((q) => {
+        if (q) {
+          prevReceivedCountRef.current = q.receivedCount ?? 0;
+          setQrInfo(q);
+        }
+      })
+      .catch(() => {});
     const sub = listen<ShelfItem[]>("shelf-updated", ({ payload }) => {
       setItems(payload);
+    });
+    const subQr = listen<QrTransferInfo | null>("qr-transfer-updated", ({ payload }) => {
+      setQrInfo(payload);
+      if (payload) {
+        if (
+          payload.mode === "receive" &&
+          payload.receivedCount > prevReceivedCountRef.current &&
+          payload.lastReceived
+        ) {
+          setStatus(`Received ${payload.lastReceived}`);
+        }
+        prevReceivedCountRef.current = payload.receivedCount;
+      } else {
+        prevReceivedCountRef.current = 0;
+      }
     });
     return () => {
       dragCleanup.current?.();
       void sub.then((u) => u()).catch(() => {});
+      void subQr.then((u) => u()).catch(() => {});
     };
   }, [load]);
 
@@ -163,12 +195,38 @@ export function FilesPanel({
 
   async function startQr(id: string) {
     const info = await runAction(() => invoke<QrTransferInfo>("start_qr_transfer", { id }));
-    if (info) setQrInfo(info);
+    if (info) {
+      prevReceivedCountRef.current = info.receivedCount ?? 0;
+      setQrInfo(info);
+    }
   }
 
   async function stopQr() {
     await invoke("stop_qr_transfer").catch(() => {});
+    prevReceivedCountRef.current = 0;
     setQrInfo(null);
+  }
+
+  async function toggleReceive() {
+    if (qrInfo?.mode === "receive") {
+      await stopQr();
+      return;
+    }
+    const info = await runAction(() => invoke<QrTransferInfo>("start_qr_receive"));
+    if (info) {
+      prevReceivedCountRef.current = info.receivedCount ?? 0;
+      setQrInfo(info);
+    }
+  }
+
+  async function handleAllowFirewall() {
+    const next = await runAction(
+      () => invoke<QrTransferInfo | null>("allow_lan_firewall"),
+      "Windows Firewall updated",
+    );
+    if (next !== null && next !== undefined) {
+      setQrInfo(next);
+    }
   }
 
   const existingIds = items.filter((i) => i.exists).map((i) => i.id);
@@ -205,6 +263,16 @@ export function FilesPanel({
           >
             <Plus size={13} />
             <span>Add</span>
+          </button>
+          <button
+            type="button"
+            className={"btn sm" + (qrInfo?.mode === "receive" ? " primary" : "")}
+            title="Receive files from your phone over Wi-Fi"
+            aria-pressed={qrInfo?.mode === "receive"}
+            onClick={() => void toggleReceive()}
+          >
+            <Smartphone size={13} />
+            <span>Receive</span>
           </button>
           {existingIds.length > 0 && (
             <button
@@ -270,18 +338,67 @@ export function FilesPanel({
       {qrInfo && (
         <div className="ui-section qr-card" role="dialog" aria-label="Phone QR transfer">
           <div className="qr-header">
-            <strong className="truncate">{qrInfo.fileName}</strong>
-            <button type="button" className="btn sm" onClick={() => void stopQr()}>
-              <X size={12} /> Stop
-            </button>
-          </div>
-          <div className="qr-body">
-            <img src={qrInfo.qrDataUrl} alt="QR download code" className="qr-img" />
-            <div className="qr-meta">
-              <span className="status-note">Scan on the same Wi-Fi network</span>
-              <code className="qr-url">{qrInfo.url}</code>
+            <div className="qr-head-left">
+              <strong className="truncate">
+                {qrInfo.mode === "receive" ? "Receive from phone" : qrInfo.fileName}
+              </strong>
+              {qrInfo.mode === "receive" && (
+                <span className="qr-count-pill">{qrInfo.receivedCount} received</span>
+              )}
+            </div>
+            <div className="qr-header-actions">
+              <button
+                type="button"
+                className={"btn sm" + (qrInfo.firewallBlocked ? " danger" : "")}
+                title="Fix Windows Firewall for phone transfer"
+                aria-label="Allow in Windows Firewall"
+                onClick={() => void handleAllowFirewall()}
+              >
+                <ShieldCheck size={12} />
+              </button>
+              <button type="button" className="btn sm" onClick={() => void stopQr()}>
+                <X size={12} /> Stop
+              </button>
             </div>
           </div>
+          <div className="qr-body">
+            <img src={qrInfo.qrDataUrl} alt="QR transfer code" className="qr-img" />
+            <div className="qr-meta">
+              <span className="status-note">
+                {qrInfo.mode === "receive"
+                  ? "Scan on the same Wi-Fi · Saves to Downloads\\Peek"
+                  : "Scan on the same Wi-Fi network"}
+              </span>
+              <div className="qr-url-row">
+                <code className="qr-url">{qrInfo.url}</code>
+                <button
+                  type="button"
+                  className="btn sm qr-copy-btn"
+                  title="Copy link"
+                  aria-label="Copy link"
+                  onClick={() =>
+                    void invoke("copy_tool_text", { text: qrInfo.url })
+                      .then(() => setStatus("Link copied"))
+                      .catch(() => {})
+                  }
+                >
+                  <Copy size={11} />
+                </button>
+              </div>
+            </div>
+          </div>
+          {qrInfo.firewallBlocked && (
+            <div className="qr-firewall-banner" role="alert">
+              <span>Windows Firewall is blocking phone connections</span>
+              <button
+                type="button"
+                className="btn primary sm"
+                onClick={() => void handleAllowFirewall()}
+              >
+                <ShieldCheck size={12} /> Allow in Firewall
+              </button>
+            </div>
+          )}
         </div>
       )}
 

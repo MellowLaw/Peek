@@ -13,6 +13,7 @@ export type PanelId =
   | "ai"
   | "files"
   | "capture"
+  | "camera"
   | "controls"
   | "clipboard"
   | "timer"
@@ -48,6 +49,7 @@ export type Preferences = {
   toggleShortcut: string;
   captureShortcut: string;
   lyricsEnabled: boolean;
+  idleLyricsEnabled: boolean;
   autostart: boolean;
   clipboardHistoryEnabled: boolean;
   notificationsEnabled: boolean;
@@ -61,6 +63,7 @@ export type Preferences = {
   pinnedRepos: string[];
   pinnedAiProviders: AiProviderId[];
   aiBudgets: ProviderBudgets;
+  cameraPanelAdded: boolean;
 };
 
 export type MonitorInfo = {

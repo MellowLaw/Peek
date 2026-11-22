@@ -119,7 +119,7 @@ impl CaptureState {
     }
 }
 
-fn local_timestamp() -> String {
+pub(crate) fn local_timestamp() -> String {
     #[cfg(windows)]
     unsafe {
         let st = windows::Win32::System::SystemInformation::GetLocalTime();
@@ -138,7 +138,7 @@ fn local_timestamp() -> String {
     }
 }
 
-fn pictures_dir() -> Result<PathBuf, String> {
+pub(crate) fn pictures_dir() -> Result<PathBuf, String> {
     let base = std::env::var("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
@@ -176,6 +176,20 @@ fn encode_png_bytes(img: &RgbaImage, fast: bool) -> Result<Vec<u8>, String> {
 fn rgba_to_data_url(img: &RgbaImage, fast: bool) -> Result<String, String> {
     let bytes = encode_png_bytes(img, fast)?;
     Ok(format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
+}
+
+fn encode_jpeg_data_url(img: &RgbaImage, quality: u8) -> Result<String, String> {
+    let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+    let mut bytes = Vec::new();
+    let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality);
+    enc.write_image(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes)))
 }
 
 fn rgba_thumbnail_url(img: &RgbaImage) -> Result<String, String> {
@@ -559,9 +573,22 @@ pub async fn begin_screen_overlay(
     }
     tokio::time::sleep(Duration::from_millis(120)).await;
 
+    let is_color = mode == "color";
     #[cfg(windows)]
-    let img = match capture_rect_rgba(vx, vy, vw, vh) {
-        Ok(i) => i,
+    let captured = tokio::task::spawn_blocking(move || {
+        let img = capture_rect_rgba(vx, vy, vw, vh)?;
+        let preview_data_url = if is_color {
+            rgba_to_data_url(&img, true)?
+        } else {
+            encode_jpeg_data_url(&img, 90)?
+        };
+        Ok::<(RgbaImage, String), String>((img, preview_data_url))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    let (img, preview_data_url) = match captured {
+        Ok(res) => res,
         Err(e) => {
             if let Some(m) = &main {
                 let _ = crate::island::show_island_window(m);
@@ -572,7 +599,6 @@ pub async fn begin_screen_overlay(
     #[cfg(not(windows))]
     return Err("Windows only".into());
 
-    let preview_data_url = rgba_to_data_url(&img, true)?;
     let payload = OverlayPayload {
         mode: mode.clone(),
         preview_data_url: preview_data_url.clone(),

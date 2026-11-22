@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Bell, BellOff, Trash2, X } from "lucide-react";
+import {
+  Bell,
+  BellOff,
+  BellRing,
+  Eye,
+  EyeOff,
+  History,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useActivity } from "../../stores/activity";
 import { usePreferences } from "../../stores/preferences";
-import { SettingSwitch } from "../settings/SettingsPanel";
 
 type WindowsNotificationStatus =
   | { status: "disabled" | "allowed" }
@@ -62,46 +70,90 @@ export function NotificationsPanel() {
     void save({ mutedSources: next });
   }
 
+  const winToastSublabel = !preferences.notificationsEnabled
+    ? "Off"
+    : winStatus.status === "allowed"
+      ? "Active"
+      : winStatus.status === "denied"
+        ? "Denied"
+        : winStatus.status === "unavailable"
+          ? "Unavailable"
+          : "Pending";
+
+  const winToastReason =
+    preferences.notificationsEnabled &&
+    winStatus.status !== "allowed" &&
+    "reason" in winStatus
+      ? winStatus.reason
+      : "";
+
   return (
     <section aria-label="Notifications" className="notif-panel">
-      <div className="ui-section notif-controls">
-        <SettingSwitch
-          label="Do Not Disturb"
-          checked={preferences.doNotDisturb}
+      {/* 2x2 Bento Quick-Toggles */}
+      <div className="notif-bento-toggles">
+        <button
+          type="button"
+          className={"notif-toggle-tile" + (preferences.doNotDisturb ? " is-on" : "")}
+          aria-pressed={preferences.doNotDisturb}
           disabled={!ready || saving}
-          onChange={(checked) => void save({ doNotDisturb: checked })}
-        />
-        <SettingSwitch
-          label="Hide sensitive content"
-          checked={preferences.hideSensitiveNotifications}
+          onClick={() => void save({ doNotDisturb: !preferences.doNotDisturb })}
+        >
+          {preferences.doNotDisturb ? <BellOff size={15} /> : <Bell size={15} />}
+          <span className="notif-toggle-copy">
+            <strong>Do Not Disturb</strong>
+            <span>{preferences.doNotDisturb ? "Silenced" : "Off"}</span>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          className={"notif-toggle-tile" + (preferences.hideSensitiveNotifications ? " is-on" : "")}
+          aria-pressed={preferences.hideSensitiveNotifications}
           disabled={!ready || saving}
-          onChange={(checked) => void save({ hideSensitiveNotifications: checked })}
-        />
-        <SettingSwitch
-          label="Save notification history"
-          checked={preferences.notificationHistoryEnabled}
+          onClick={() =>
+            void save({ hideSensitiveNotifications: !preferences.hideSensitiveNotifications })
+          }
+        >
+          {preferences.hideSensitiveNotifications ? <EyeOff size={15} /> : <Eye size={15} />}
+          <span className="notif-toggle-copy">
+            <strong>Hide Sensitive</strong>
+            <span>{preferences.hideSensitiveNotifications ? "Redacted" : "Visible"}</span>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          className={"notif-toggle-tile" + (preferences.notificationHistoryEnabled ? " is-on" : "")}
+          aria-pressed={preferences.notificationHistoryEnabled}
           disabled={!ready || saving}
-          onChange={(checked) => void save({ notificationHistoryEnabled: checked })}
-        />
+          onClick={() =>
+            void save({ notificationHistoryEnabled: !preferences.notificationHistoryEnabled })
+          }
+        >
+          <History size={15} />
+          <span className="notif-toggle-copy">
+            <strong>Save History</strong>
+            <span>{preferences.notificationHistoryEnabled ? "Keeping" : "Off"}</span>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          className={"notif-toggle-tile" + (preferences.notificationsEnabled ? " is-on" : "")}
+          aria-pressed={preferences.notificationsEnabled}
+          disabled={!ready || saving}
+          title={winToastReason || "Toggle Windows toast listener"}
+          onClick={() => void save({ notificationsEnabled: !preferences.notificationsEnabled })}
+        >
+          <BellRing size={15} />
+          <span className="notif-toggle-copy">
+            <strong>Win Toasts</strong>
+            <span>{winToastSublabel}</span>
+          </span>
+        </button>
       </div>
 
-      <div className="ui-section notif-win-card">
-        <SettingSwitch
-          label="Windows toast notifications"
-          checked={preferences.notificationsEnabled}
-          disabled={!ready || saving}
-          onChange={(checked) => void save({ notificationsEnabled: checked })}
-        />
-        <div className="status-note">
-          {winStatus.status === "disabled"
-            ? "Off — Peek still collects local alerts from Music, AI, Capture, Timer, and Local API."
-            : winStatus.status === "allowed"
-              ? "Windows notification listener active."
-              : "reason" in winStatus
-                ? winStatus.reason
-                : ""}
-        </div>
-      </div>
+      {winToastReason && <div className="status-note">{winToastReason}</div>}
 
       <div className="notif-header-row">
         <div className="notif-filters">
@@ -150,26 +202,26 @@ export function NotificationsPanel() {
       </div>
 
       {filtered.length === 0 ? (
-        <div className="empty-panel">
-          <Bell size={26} strokeWidth={1.5} />
+        <div className="empty-panel notif-empty-bento">
+          <Bell size={24} strokeWidth={1.5} />
           <span>No notifications</span>
         </div>
       ) : (
         <div className="notif-list">
           {filtered.map((n) => (
-            <div key={n.id} className="ui-row notif-item">
+            <div key={n.id} className="notif-card">
               <div className="notif-item-top">
                 <div className="notif-item-meta">
                   <span className="notif-source">{n.source}</span>
-                  <span className="status-note">{relativeTime(n.createdAtMs)}</span>
+                  <span className="notif-time">{relativeTime(n.createdAtMs)}</span>
                 </div>
                 <button
                   type="button"
-                  className="btn sm"
+                  className="notif-dismiss-btn"
                   aria-label="Dismiss notification"
                   onClick={() => void dismissNotification(n.id)}
                 >
-                  <X size={12} />
+                  <X size={11} />
                 </button>
               </div>
               <strong>{n.title}</strong>

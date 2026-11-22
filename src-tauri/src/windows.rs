@@ -80,18 +80,60 @@ impl ForegroundTracker {
     }
 }
 
-/// Collect raw HWNDs for Peek's known windows so foreground/window capture excludes Peek itself.
+/// Collect raw HWNDs for all of Peek's open windows so foreground/window capture excludes Peek itself.
 pub fn peek_hwnds(app: &tauri::AppHandle) -> Vec<isize> {
     use tauri::Manager;
-    let mut out = Vec::new();
-    for label in ["main", "capture-overlay"] {
-        if let Some(win) = app.get_webview_window(label) {
-            if let Ok(hwnd) = win.hwnd() {
-                out.push(hwnd.0 as isize);
-            }
+    app.webview_windows()
+        .values()
+        .filter_map(|win| win.hwnd().ok().map(|h| h.0 as isize))
+        .collect()
+}
+
+/// Apply a crisp rounded `SetWindowRgn` clip matching the window's physical pixel bounds.
+pub fn apply_rounded_window_region(
+    window: &WebviewWindow,
+    radius_logical: f64,
+) -> Result<(), String> {
+    let handle = window.hwnd().map_err(|e| e.to_string())?;
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let w = (size.width as i32).max(2);
+    let h = (size.height as i32).max(2);
+    let dia = ((radius_logical * 2.0 * scale).round() as i32)
+        .min(w)
+        .min(h)
+        .max(2);
+    unsafe {
+        let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, dia, dia);
+        if rgn.is_null() {
+            return Err("Could not create rounded floating window region".into());
+        }
+        if SetWindowRgn(handle.0, rgn, 1) == 0 {
+            DeleteObject(rgn);
+            return Err("SetWindowRgn failed for floating window".into());
         }
     }
-    out
+    Ok(())
+}
+
+/// Begin native Win32 caption-less window dragging via `WM_NCLBUTTONDOWN` + `HTCAPTION`.
+pub fn begin_window_drag(window: &WebviewWindow) -> Result<(), String> {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, HTCAPTION, WM_NCLBUTTONDOWN};
+
+    let handle = window.hwnd().map_err(|e| e.to_string())?;
+    let hwnd = HWND(handle.0);
+    unsafe {
+        let _ = ReleaseCapture();
+        SendMessageW(
+            hwnd,
+            WM_NCLBUTTONDOWN,
+            Some(WPARAM(HTCAPTION as usize)),
+            Some(LPARAM(0)),
+        );
+    }
+    Ok(())
 }
 
 /// Strip all Win32 caption/border/frame styles and DWM frame chrome so a shaped
@@ -334,6 +376,22 @@ pub fn set_island_region(
     Ok(())
 }
 
+/// Apply an empty HWND region when the notch is fully hidden so zero pixels or hit targets remain.
+pub fn clear_island_region(window: &WebviewWindow) -> Result<(), String> {
+    let handle = window.hwnd().map_err(|error| error.to_string())?;
+    unsafe {
+        let region = CreateRectRgn(0, 0, 0, 0);
+        if region.is_null() {
+            return Err("Could not create empty island region".into());
+        }
+        if SetWindowRgn(handle.0, region, 1) == 0 {
+            DeleteObject(region);
+            return Err("Could not clear the island's region".into());
+        }
+    }
+    Ok(())
+}
+
 /// Read the current global cursor position in physical screen coordinates.
 pub fn cursor_position() -> Option<(i32, i32)> {
     use windows::Win32::Foundation::POINT;
@@ -493,8 +551,10 @@ pub fn open_ms_settings(key: &str) -> Result<(), String> {
         "display" => "ms-settings:display",
         "bluetooth" => "ms-settings:bluetooth",
         "network-wifi" => "ms-settings:network-wifi",
+        "network-airplanemode" => "ms-settings:network-airplanemode",
         "powersleep" => "ms-settings:powersleep",
         "notifications" => "ms-settings:notifications",
+        "easeofaccess" => "ms-settings:easeofaccess",
         "privacy-microphone" => "ms-settings:privacy-microphone",
         _ => return Err("Unsupported Windows settings target".into()),
     };
@@ -995,6 +1055,170 @@ pub fn read_clipboard_image_rgba() -> Option<(u32, u32, Vec<u8>)> {
     }
 }
 
+pub(crate) fn firewall_rule_blocks_exe(rule: &str, exe_path: &str) -> bool {
+    let mut is_block = false;
+    let mut is_active = true;
+    let mut is_inbound = false;
+    let mut proto_tcp_or_any = true;
+    let mut app_matches = false;
+
+    for part in rule.split('|') {
+        let Some((k, v)) = part.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let val = v.trim();
+        if key.eq_ignore_ascii_case("Action") {
+            is_block = val.eq_ignore_ascii_case("Block");
+        } else if key.eq_ignore_ascii_case("Active") {
+            is_active = !val.eq_ignore_ascii_case("FALSE");
+        } else if key.eq_ignore_ascii_case("Dir") {
+            is_inbound = val.eq_ignore_ascii_case("In");
+        } else if key.eq_ignore_ascii_case("Protocol") {
+            proto_tcp_or_any = val == "6" || val.is_empty();
+        } else if key.eq_ignore_ascii_case("App") {
+            app_matches = val.eq_ignore_ascii_case(exe_path);
+        }
+    }
+
+    is_block && is_active && is_inbound && proto_tcp_or_any && app_matches
+}
+
+pub fn is_exe_inbound_firewall_blocked() -> bool {
+    use windows::core::{w, PWSTR};
+    use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegEnumValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ,
+    };
+
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let exe_str = exe
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+
+    unsafe {
+        let mut key = HKEY::default();
+        let status = RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            w!(
+                r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
+            ),
+            None,
+            KEY_READ,
+            &mut key,
+        );
+        if status != ERROR_SUCCESS {
+            return false;
+        }
+
+        let mut blocked = false;
+        let mut index = 0u32;
+        let mut name_buf = vec![0u16; 512];
+        let mut data_buf = vec![0u8; 4096];
+
+        loop {
+            let mut name_len = name_buf.len() as u32;
+            let mut val_type = 0u32;
+            let mut data_len = data_buf.len() as u32;
+            let res = RegEnumValueW(
+                key,
+                index,
+                Some(PWSTR(name_buf.as_mut_ptr())),
+                &mut name_len,
+                None,
+                Some(&mut val_type),
+                Some(data_buf.as_mut_ptr()),
+                Some(&mut data_len),
+            );
+            if res == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if res == ERROR_MORE_DATA {
+                let mut grew = false;
+                if name_len as usize >= name_buf.len() && name_buf.len() < 4096 {
+                    name_buf.resize(((name_len as usize) + 1).min(4096), 0);
+                    grew = true;
+                }
+                if data_len as usize > data_buf.len() && data_buf.len() < 65536 {
+                    data_buf.resize((data_len as usize).min(65536), 0);
+                    grew = true;
+                }
+                if !grew {
+                    index += 1;
+                }
+                continue;
+            }
+            if res != ERROR_SUCCESS {
+                break;
+            }
+            index += 1;
+
+            if val_type == REG_SZ.0 && data_len >= 2 {
+                let slice_bytes = &data_buf[..((data_len as usize) & !1)];
+                let units: Vec<u16> = slice_bytes
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+                let rule = String::from_utf16_lossy(&units[..end]);
+                if firewall_rule_blocks_exe(&rule, &exe_str) {
+                    blocked = true;
+                    break;
+                }
+            }
+        }
+
+        let _ = RegCloseKey(key);
+        blocked
+    }
+}
+
+pub fn allow_exe_in_windows_firewall() -> Result<(), String> {
+    use windows::core::{w, HSTRING, PCWSTR};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED};
+    use windows::Win32::System::Threading::WaitForSingleObject;
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_str = exe
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .replace('\'', "''");
+    let script = format!(
+        "$p = '{exe_str}'; Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object {{ $_.Program -ieq $p }} | ForEach-Object {{ Remove-NetFirewallRule -AssociatedNetFirewallApplicationFilter $_ -ErrorAction SilentlyContinue }}; New-NetFirewallRule -DisplayName 'Peek LAN Transfer' -Direction Inbound -Action Allow -Protocol TCP -Profile Private -Program $p | Out-Null"
+    );
+    let args = format!("-NoProfile -WindowStyle Hidden -Command \"{script}\"");
+    let params_w = HSTRING::from(args);
+    let _suppress = suppress_auto_close();
+
+    unsafe {
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS,
+            lpVerb: w!("runas"),
+            lpFile: w!("powershell.exe"),
+            lpParameters: PCWSTR(params_w.as_ptr()),
+            nShow: SW_HIDE.0,
+            ..Default::default()
+        };
+        if let Err(err) = ShellExecuteExW(&mut info) {
+            if err.code() == ERROR_CANCELLED.to_hresult() {
+                return Err("Canceled".into());
+            }
+            return Err(format!("Could not update Windows Firewall: {err}"));
+        }
+        if !info.hProcess.is_invalid() && !info.hProcess.0.is_null() {
+            let _ = WaitForSingleObject(info.hProcess, 15_000);
+            let _ = CloseHandle(info.hProcess);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1120,5 +1344,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn detects_inbound_tcp_firewall_block_rules() {
+        let exe = r"C:\Users\Lawrence\Peek\peek.exe";
+        assert!(firewall_rule_blocks_exe(
+            "v2.10|Action=Block|Active=TRUE|Dir=In|Protocol=6|Profile=Private|App=c:\\users\\lawrence\\peek\\peek.exe|Name=peek.exe|",
+            exe,
+        ));
+        assert!(firewall_rule_blocks_exe(
+            "v2.10|Action=Block|Active=TRUE|Dir=In|App=C:\\Users\\Lawrence\\Peek\\peek.exe|",
+            exe,
+        ));
+        assert!(!firewall_rule_blocks_exe(
+            "v2.10|Action=Block|Active=TRUE|Dir=In|Protocol=17|App=C:\\Users\\Lawrence\\Peek\\peek.exe|",
+            exe,
+        ));
+        assert!(!firewall_rule_blocks_exe(
+            "v2.10|Action=Allow|Active=TRUE|Dir=In|Protocol=6|App=C:\\Users\\Lawrence\\Peek\\peek.exe|",
+            exe,
+        ));
+        assert!(!firewall_rule_blocks_exe(
+            "v2.10|Action=Block|Active=TRUE|Dir=Out|Protocol=6|App=C:\\Users\\Lawrence\\Peek\\peek.exe|",
+            exe,
+        ));
+        assert!(!firewall_rule_blocks_exe(
+            "v2.10|Action=Block|Active=FALSE|Dir=In|Protocol=6|App=C:\\Users\\Lawrence\\Peek\\peek.exe|",
+            exe,
+        ));
+        assert!(!firewall_rule_blocks_exe(
+            "v2.10|Action=Block|Active=TRUE|Dir=In|Protocol=6|App=C:\\Other\\app.exe|",
+            exe,
+        ));
     }
 }

@@ -662,22 +662,23 @@ pub async fn set_app_audio(
 }
 
 #[cfg(windows)]
-unsafe fn set_wmi_proxy_blanket<P: windows_core::Interface>(proxy: &P) {
+unsafe fn set_wmi_proxy_blanket<P>(proxy: P)
+where
+    P: windows_core::Param<windows_core::IUnknown>,
+{
     use windows::Win32::System::Com::{
         CoSetProxyBlanket, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
     };
-    if let Ok(unk) = proxy.cast::<windows_core::IUnknown>() {
-        let _ = CoSetProxyBlanket(
-            &unk,
-            10,
-            0,
-            None,
-            RPC_C_AUTHN_LEVEL_CALL,
-            RPC_C_IMP_LEVEL_IMPERSONATE,
-            None,
-            EOAC_NONE,
-        );
-    }
+    let _ = CoSetProxyBlanket(
+        proxy,
+        10,
+        0,
+        None,
+        RPC_C_AUTHN_LEVEL_CALL,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        None,
+        EOAC_NONE,
+    );
 }
 
 #[cfg(windows)]
@@ -722,7 +723,13 @@ fn read_wmi_brightness() -> Result<Vec<BrightnessDisplay>, String> {
             let mut objs = [None];
             let mut returned = 0u32;
             let hr = enumerator.Next(WBEM_INFINITE, &mut objs, &mut returned);
-            if hr.is_err() || returned == 0 {
+            if hr.is_err() {
+                if out.is_empty() {
+                    return Err(format!("WMI brightness query failed: {:?}", hr));
+                }
+                break;
+            }
+            if returned == 0 {
                 break;
             }
             if let Some(obj) = objs[0].take() {
@@ -1255,6 +1262,159 @@ pub fn open_windows_setting(key: String) -> Result<(), String> {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectivitySnapshot {
+    pub wifi_available: bool,
+    pub wifi_on: bool,
+    pub wifi_name: String,
+    pub bluetooth_available: bool,
+    pub bluetooth_on: bool,
+    pub energy_saver: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RadioToggleKind {
+    Wifi,
+    Bluetooth,
+}
+
+pub fn parse_radio_kind(kind: &str) -> Result<RadioToggleKind, String> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "wifi" => Ok(RadioToggleKind::Wifi),
+        "bluetooth" => Ok(RadioToggleKind::Bluetooth),
+        _ => Err("Unsupported radio kind".into()),
+    }
+}
+
+#[cfg(windows)]
+async fn read_connectivity_async() -> ConnectivitySnapshot {
+    use windows::Devices::Radios::{Radio, RadioKind, RadioState};
+    use windows::Networking::Connectivity::NetworkInformation;
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+
+    let mut snap = ConnectivitySnapshot::default();
+
+    if let Ok(op) = Radio::GetRadiosAsync() {
+        if let Ok(radios) = op.await {
+            for radio in radios {
+                let Ok(kind) = radio.Kind() else { continue };
+                let on = radio.State().is_ok_and(|s| s == RadioState::On);
+                if kind == RadioKind::WiFi {
+                    snap.wifi_available = true;
+                    snap.wifi_on = snap.wifi_on || on;
+                } else if kind == RadioKind::Bluetooth {
+                    snap.bluetooth_available = true;
+                    snap.bluetooth_on = snap.bluetooth_on || on;
+                }
+            }
+        }
+    }
+
+    if let Ok(profile) = NetworkInformation::GetInternetConnectionProfile() {
+        let mut name = String::new();
+        if let Ok(wlan) = profile.WlanConnectionProfileDetails() {
+            if let Ok(ssid) = wlan.GetConnectedSsid() {
+                name = ssid.to_string_lossy();
+            }
+        }
+        if name.trim().is_empty() {
+            if let Ok(pname) = profile.ProfileName() {
+                name = pname.to_string_lossy();
+            }
+        }
+        snap.wifi_name = name.trim().to_string();
+    }
+
+    let mut sps = SYSTEM_POWER_STATUS::default();
+    if unsafe { GetSystemPowerStatus(&mut sps) }.is_ok() {
+        snap.energy_saver = (sps.SystemStatusFlag & 1) != 0;
+    }
+
+    snap
+}
+
+#[cfg(windows)]
+async fn toggle_radio_async(target: RadioToggleKind) -> Result<ConnectivitySnapshot, String> {
+    use windows::Devices::Radios::{Radio, RadioAccessStatus, RadioKind, RadioState};
+
+    let want_kind = match target {
+        RadioToggleKind::Wifi => RadioKind::WiFi,
+        RadioToggleKind::Bluetooth => RadioKind::Bluetooth,
+    };
+
+    let _ = Radio::RequestAccessAsync()
+        .map_err(|e| e.to_string())?
+        .await
+        .map_err(|e| e.to_string())?;
+    let radios = Radio::GetRadiosAsync()
+        .map_err(|e| e.to_string())?
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut found = Vec::new();
+    for radio in radios {
+        if radio.Kind().ok() == Some(want_kind) {
+            found.push(radio);
+        }
+    }
+    if found.is_empty() {
+        return Err("Hardware radio unavailable".into());
+    }
+
+    let any_on = found
+        .iter()
+        .any(|r| r.State().is_ok_and(|s| s == RadioState::On));
+    let next_state = if any_on {
+        RadioState::Off
+    } else {
+        RadioState::On
+    };
+
+    for radio in found {
+        let status = radio
+            .SetStateAsync(next_state)
+            .map_err(|e| e.to_string())?
+            .await
+            .map_err(|e| e.to_string())?;
+        if status != RadioAccessStatus::Allowed {
+            return Err("Windows denied radio toggle permission".into());
+        }
+    }
+
+    Ok(read_connectivity_async().await)
+}
+
+#[tauri::command]
+pub async fn get_connectivity_state() -> ConnectivitySnapshot {
+    #[cfg(windows)]
+    {
+        tokio::task::spawn_blocking(|| tauri::async_runtime::block_on(read_connectivity_async()))
+            .await
+            .unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    ConnectivitySnapshot::default()
+}
+
+#[tauri::command]
+pub async fn toggle_radio(kind: String) -> Result<ConnectivitySnapshot, String> {
+    let parsed = parse_radio_kind(&kind)?;
+    #[cfg(windows)]
+    {
+        tokio::task::spawn_blocking(move || {
+            tauri::async_runtime::block_on(toggle_radio_async(parsed))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = parsed;
+        Ok(ConnectivitySnapshot::default())
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
@@ -1288,5 +1448,15 @@ mod tests {
                 set_wmi_brightness(inst, disp.level).expect("reapply current wmi brightness");
             }
         }
+    }
+
+    #[test]
+    fn parses_radio_kind_safely() {
+        assert_eq!(parse_radio_kind("wifi").unwrap(), RadioToggleKind::Wifi);
+        assert_eq!(
+            parse_radio_kind("Bluetooth").unwrap(),
+            RadioToggleKind::Bluetooth
+        );
+        assert!(parse_radio_kind("nfc").is_err());
     }
 }

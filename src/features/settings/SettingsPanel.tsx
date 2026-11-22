@@ -17,6 +17,7 @@ const PANEL_LABELS: Record<PanelId, string> = {
   ai: "AI",
   files: "Files",
   capture: "Capture",
+  camera: "Camera",
   controls: "Controls",
   clipboard: "Clipboard",
   timer: "Timer",
@@ -224,6 +225,14 @@ export function SettingsPanel() {
             disabled={!ready || saving}
             onChange={(checked) => void save({ lyricsEnabled: checked })}
           />
+          {preferences.lyricsEnabled && (
+            <SettingSwitch
+              label="Show lyrics in collapsed notch"
+              checked={preferences.idleLyricsEnabled}
+              disabled={!ready || saving}
+              onChange={(checked) => void save({ idleLyricsEnabled: checked })}
+            />
+          )}
           <SettingSwitch
             label="Launch Peek at Windows sign-in"
             checked={preferences.autostart}

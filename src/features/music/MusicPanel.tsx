@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Music2 } from "lucide-react";
+import { Music2, Settings } from "lucide-react";
 import { PinnedAiStrip, type PinnedAiItem } from "../../components/AiNotchIcons";
 import {
   SolidNextIcon,
@@ -1048,17 +1048,40 @@ function Player({
   lyrical: LyricalSnapshot;
   accentRgbOverride?: string;
 }) {
-  const { preferences } = usePreferences();
+  const { preferences, ready, saving, save } = usePreferences();
   const [now, setNow] = useState(Date.now);
   const [pending, setPending] = useState(false);
+  const [lyricsMenuOpen, setLyricsMenuOpen] = useState(false);
   const [scrubPos, setScrubPos] = useState<number | null>(null);
   const [seekSignal, setSeekSignal] = useState<{ seq: number; time: number } | null>(null);
   const [selectedSource, setSelectedSource] = useState<string>("");
   const [error, setError] = useState("");
   const trackBarRef = useRef<HTMLDivElement>(null);
+  const lyricsPopoverWrapRef = useRef<HTMLDivElement>(null);
   const draggingSeekRef = useRef(false);
   const computedPalette = useAlbumPalette(track.artwork);
   const accentRgb = accentRgbOverride ?? computedPalette.accentRgb;
+
+  useEffect(() => {
+    if (!lyricsMenuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (
+        lyricsPopoverWrapRef.current &&
+        !lyricsPopoverWrapRef.current.contains(e.target as Node)
+      ) {
+        setLyricsMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLyricsMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [lyricsMenuOpen]);
 
   useEffect(() => {
     if (!track.playing) return;
@@ -1117,7 +1140,7 @@ function Player({
 
   return (
     <section aria-label="Now playing" className="music-layout">
-      <div className="music-left">
+      <div className="music-left" ref={lyricsPopoverWrapRef}>
         {track.sessions.length > 1 && (
           <div className="media-source-row">
             <select
@@ -1177,9 +1200,56 @@ function Player({
               >
                 <SolidNextIcon size={16} />
               </button>
+              <button
+                type="button"
+                className={
+                  "music-lyrics-settings-btn" +
+                  (lyricsMenuOpen ? " is-open" : "") +
+                  (!preferences.lyricsEnabled || !preferences.idleLyricsEnabled ? " is-dim" : "")
+                }
+                aria-label="Lyrics settings"
+                aria-expanded={lyricsMenuOpen}
+                title="Lyrics settings"
+                onClick={() => setLyricsMenuOpen((v) => !v)}
+              >
+                <Settings size={15} strokeWidth={1.75} />
+              </button>
             </div>
           </div>
         </div>
+
+        {lyricsMenuOpen && (
+          <div className="music-lyrics-popover" role="dialog" aria-label="Lyrics settings">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={preferences.idleLyricsEnabled}
+              disabled={!ready || saving || !preferences.lyricsEnabled}
+              className={
+                "music-popover-row" + (preferences.idleLyricsEnabled ? " is-on" : "")
+              }
+              onClick={() => void save({ idleLyricsEnabled: !preferences.idleLyricsEnabled })}
+            >
+              <span>Notch lyrics</span>
+              <span className="music-popover-pill" aria-hidden="true">
+                {preferences.idleLyricsEnabled ? "On" : "Off"}
+              </span>
+            </button>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={preferences.lyricsEnabled}
+              disabled={!ready || saving}
+              className={"music-popover-row" + (preferences.lyricsEnabled ? " is-on" : "")}
+              onClick={() => void save({ lyricsEnabled: !preferences.lyricsEnabled })}
+            >
+              <span>Synced lyrics</span>
+              <span className="music-popover-pill" aria-hidden="true">
+                {preferences.lyricsEnabled ? "On" : "Off"}
+              </span>
+            </button>
+          </div>
+        )}
 
         {track.durationSeconds > 0 && (
           <div className="music-progress-row">

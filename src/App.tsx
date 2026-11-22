@@ -6,6 +6,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Bell,
   Bot,
+  Camera,
   Clipboard,
   Files,
   LogOut,
@@ -27,6 +28,7 @@ import {
   SolidStopIcon,
 } from "./components/SolidIcons";
 import { AiPanel, computePinnedAiItems, useAiUsage } from "./features/ai/AiPanel";
+import { CameraPanel } from "./features/camera/CameraPanel";
 import { CapturePanel } from "./features/capture/CapturePanel";
 import { ControlsPanel } from "./features/controls/ControlsPanel";
 import { FilesPanel } from "./features/files/FilesPanel";
@@ -50,6 +52,7 @@ const PANEL_META: Record<PanelId, { label: string; icon: typeof Music2 }> = {
   ai: { label: "AI", icon: Bot },
   files: { label: "Files", icon: Files },
   capture: { label: "Capture", icon: ScanLine },
+  camera: { label: "Cam", icon: Camera },
   controls: { label: "Controls", icon: SlidersHorizontal },
   clipboard: { label: "Clipboard", icon: Clipboard },
   timer: { label: "Timer", icon: Timer },
@@ -82,8 +85,8 @@ const EXPAND_SPRING = {
 
 const COLLAPSE_SPRING = {
   type: "spring" as const,
-  stiffness: 430,
-  damping: 33,
+  stiffness: 360,
+  damping: 30,
   mass: 0.72,
 };
 
@@ -102,7 +105,7 @@ function logicalDimensions(
 ) {
   switch (mode) {
     case "hidden":
-      return { width: 220, height: 4, radius: 0 };
+      return { width: 120, height: 0, radius: 14 };
     case "idle":
       return pinnedAiCount && pinnedAiCount > 0
         ? { width: 118 + pinnedAiCount * 46, height: 32, radius: 17 }
@@ -257,6 +260,7 @@ function OngoingPillBadge({
 
 export function App() {
   const [mode, setMode] = useState<Mode>("idle");
+  const [hiddenSettled, setHiddenSettled] = useState(false);
   const [expandedHeight, setExpandedHeight] = useState(260);
   const [lyricsWidth, setLyricsWidth] = useState(220);
   const [growingTransition, setGrowingTransition] = useState(true);
@@ -326,6 +330,9 @@ export function App() {
     const active = activeTransitionRef.current;
     if (!active || active.settled) return;
     active.settled = true;
+    if (active.mode === "hidden") {
+      setHiddenSettled(true);
+    }
     void invoke("settle_island_transition", {
       mode: active.mode,
       targetWidth: active.targetWidth,
@@ -381,6 +388,7 @@ export function App() {
         !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
       setGrowingTransition(isGrowing);
+      setHiddenSettled(false);
 
       try {
         const token = await invoke<number>("prepare_island_transition", {
@@ -401,7 +409,7 @@ export function App() {
         setError("");
 
         const sameSize = prevDims.width === nextDims.width && prevDims.height === nextDims.height;
-        const safetyDelay = !animate || sameSize ? 24 : 430;
+        const safetyDelay = !animate || sameSize ? 24 : 420;
         settleTimer.current = setTimeout(() => {
           settleActiveTransition();
         }, safetyDelay);
@@ -452,7 +460,7 @@ export function App() {
 
   const watchMediaActive =
     visible &&
-    (preferences.lyricsEnabled ||
+    ((preferences.lyricsEnabled && preferences.idleLyricsEnabled) ||
       mode === "preview" ||
       (mode === "expanded" && panel === "music"));
   const media = useMedia(watchMediaActive);
@@ -460,7 +468,9 @@ export function App() {
   const lyricsActive =
     visible &&
     preferences.lyricsEnabled &&
-    ((mode === "expanded" && panel === "music") || mediaPlaying || mode === "lyrics");
+    ((mode === "expanded" && panel === "music") ||
+      (mediaPlaying && preferences.idleLyricsEnabled) ||
+      mode === "lyrics");
   const lyrical = useLyrical(media, lyricsActive, preferences.lyricsEnabled);
 
   const watchAiActive =
@@ -487,7 +497,7 @@ export function App() {
       : activity.activeBanner || updatePromptActive
         ? "activity"
         : preferences.alwaysVisible
-          ? mediaPlaying && preferences.lyricsEnabled
+          ? mediaPlaying && preferences.lyricsEnabled && preferences.idleLyricsEnabled
             ? "lyrics"
             : "idle"
           : "hidden";
@@ -622,6 +632,8 @@ export function App() {
       }),
       listen<boolean>("peek-visibility", ({ payload }) => setVisible(payload)),
       listen("top-edge-hover", () => {
+        clearTimeout(leavePreviewTimer.current);
+        clearTimeout(autoCloseTimer.current);
         if (
           requestedMode.current === "hidden" ||
           requestedMode.current === "idle" ||
@@ -799,22 +811,25 @@ export function App() {
           } as CSSProperties
         }
       >
-        {mode !== "hidden" && (
-          <svg
-            className="notch-ear left"
-            width="10"
-            height="10"
-            viewBox="0 0 10 10"
-            aria-hidden="true"
-          >
-            <path d="M 0 0 L 10 0 L 10 10 L 8.2 10 A 8.2 8.2 0 0 0 0 1.8 Z" fill="currentColor" />
-          </svg>
-        )}
+        <svg
+          className="notch-ear left"
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          aria-hidden="true"
+        >
+          <path d="M 0 0 L 10 0 L 10 10 L 8.2 10 A 8.2 8.2 0 0 0 0 1.8 Z" fill="currentColor" />
+        </svg>
 
         <motion.main
           ref={shellRef}
           tabIndex={-1}
-          className={"notch-shell " + mode + (musicThemeActive ? " music-themed" : "")}
+          className={
+            "notch-shell " +
+            (mode === "hidden" ? "mode-hidden" : mode) +
+            (mode === "hidden" && hiddenSettled ? " hidden-settled" : "") +
+            (musicThemeActive ? " music-themed" : "")
+          }
           style={shellStyle}
           initial={false}
           animate={{
@@ -822,6 +837,7 @@ export function App() {
             height: dims.height,
             borderBottomLeftRadius: dims.radius,
             borderBottomRightRadius: dims.radius,
+            opacity: mode === "hidden" && hiddenSettled ? 0 : 1,
           }}
           transition={springTransition}
           onAnimationComplete={settleActiveTransition}
@@ -888,7 +904,7 @@ export function App() {
                   openedByHoverRef.current = false;
                   void changeMode(collapsedTargetRef.current);
                 }
-              }, 420);
+              }, 130);
             }
           }}
           onKeyDown={handleKeyDown}
@@ -1254,6 +1270,8 @@ export function App() {
                       />
                     ) : panel === "capture" ? (
                       <CapturePanel />
+                    ) : panel === "camera" ? (
+                      <CameraPanel />
                     ) : panel === "controls" ? (
                       <ControlsPanel />
                     ) : panel === "notifications" ? (
@@ -1284,17 +1302,15 @@ export function App() {
           )}
         </motion.main>
 
-        {mode !== "hidden" && (
-          <svg
-            className="notch-ear right"
-            width="10"
-            height="10"
-            viewBox="0 0 10 10"
-            aria-hidden="true"
-          >
-            <path d="M 0 0 L 10 0 L 10 10 L 8.2 10 A 8.2 8.2 0 0 0 0 1.8 Z" fill="currentColor" />
-          </svg>
-        )}
+        <svg
+          className="notch-ear right"
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          aria-hidden="true"
+        >
+          <path d="M 0 0 L 10 0 L 10 10 L 8.2 10 A 8.2 8.2 0 0 0 0 1.8 Z" fill="currentColor" />
+        </svg>
       </div>
     </div>
   );

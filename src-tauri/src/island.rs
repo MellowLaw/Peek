@@ -233,9 +233,15 @@ fn apply_settled_region(
     logical_h: f64,
     metrics: MonitorMetrics,
 ) -> Result<(), String> {
+    if matches!(mode, Mode::Hidden) {
+        #[cfg(windows)]
+        return crate::windows::clear_island_region(window);
+        #[cfg(not(windows))]
+        return Ok(());
+    }
     let (_pos, stage_size) = stage_physical_bounds(metrics);
     let (rw, rh, ear_px) = region_physical_size(mode, logical_w, logical_h, metrics, stage_size);
-    let rounded_bottom = !matches!(mode, Mode::Hidden);
+    let rounded_bottom = true;
     let radius_logical = mode_corner_radius(mode);
     #[cfg(windows)]
     crate::windows::set_island_region(
@@ -354,13 +360,13 @@ pub fn start_visibility_watcher(app: AppHandle, always_visible: bool) -> Visibil
                                 let scale = mon.scale_factor();
                                 let area = mon.work_area();
                                 let center_x = area.position.x + (area.size.width as i32) / 2;
-                                let half_zone = (130.0 * scale).round() as i32;
+                                let half_zone = (140.0 * scale).round() as i32;
                                 let top_threshold = area.position.y + (6.0 * scale).round() as i32;
                                 let in_zone = cy <= top_threshold
                                     && cy >= area.position.y - 4
                                     && (cx - center_x).abs() <= half_zone;
                                 if in_zone && !was_in_zone {
-                                    if last_emit.elapsed() > Duration::from_millis(350) {
+                                    if last_emit.elapsed() > Duration::from_millis(140) {
                                         last_emit = Instant::now();
                                         let _ = win.emit("top-edge-hover", ());
                                     }
@@ -374,7 +380,7 @@ pub fn start_visibility_watcher(app: AppHandle, always_visible: bool) -> Visibil
                 }
                 tokio::select! {
                     _ = rx.changed() => {}
-                    _ = tokio::time::sleep(Duration::from_millis(60)) => {}
+                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
                 }
             }
         }

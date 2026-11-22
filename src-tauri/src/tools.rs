@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::Cursor,
     path::{Path, PathBuf},
@@ -137,6 +137,7 @@ pub struct ToolsState {
     notes: Mutex<NotesStoreData>,
     timer: Arc<Mutex<TimerInner>>,
     timer_wake: Arc<Notify>,
+    app_icons: Mutex<HashMap<String, Option<String>>>,
     app_handle: AppHandle,
 }
 
@@ -395,6 +396,7 @@ impl ToolsState {
             notes: Mutex::new(notes_data),
             timer: Arc::new(Mutex::new(TimerInner::default())),
             timer_wake: Arc::new(Notify::new()),
+            app_icons: Mutex::new(HashMap::new()),
             app_handle: app.clone(),
         });
 
@@ -671,6 +673,25 @@ impl ToolsState {
         Ok(())
     }
 
+    pub fn create_empty_note(&self) -> Result<NoteItem, String> {
+        let ts = now_ms();
+        let (created, data) = {
+            let mut g = self.notes.lock().unwrap();
+            let id = format!("note-{ts}-{}", g.notes.len() + 1);
+            let item = NoteItem {
+                id,
+                title: "Quick Note".to_string(),
+                body: String::new(),
+                updated_at_ms: ts,
+            };
+            g.notes.insert(0, item.clone());
+            (item, g.clone())
+        };
+        self.save_notes(&data)?;
+        let _ = self.app_handle.emit("notes-updated", &data);
+        Ok(created)
+    }
+
     pub fn timer_snapshot(&self) -> TimerSnapshot {
         let g = self.timer.lock().unwrap();
         TimerSnapshot {
@@ -812,6 +833,7 @@ pub fn save_note(
         g.clone()
     };
     state.save_notes(&data)?;
+    let _ = state.app_handle.emit("notes-updated", &data);
     Ok(data)
 }
 
@@ -826,6 +848,7 @@ pub fn delete_note(
         g.clone()
     };
     state.save_notes(&data)?;
+    let _ = state.app_handle.emit("notes-updated", &data);
     Ok(data)
 }
 
@@ -1113,9 +1136,7 @@ pub async fn scan_installed_apps() -> Vec<InstalledApp> {
     .unwrap_or_default()
 }
 
-#[tauri::command]
-pub fn launch_app(path: String) -> Result<(), String> {
-    let candidate = Path::new(&path);
+fn is_allowed_shortcut_path(candidate: &Path) -> Result<PathBuf, String> {
     if candidate
         .extension()
         .and_then(|e| e.to_str())
@@ -1131,6 +1152,66 @@ pub fn launch_app(path: String) -> Result<(), String> {
     if !allowed {
         return Err("Shortcut path is outside Start Menu roots".into());
     }
+    Ok(canon)
+}
+
+#[tauri::command]
+pub async fn get_app_icons(
+    state: State<'_, Arc<ToolsState>>,
+    paths: Vec<String>,
+) -> Result<HashMap<String, String>, String> {
+    const MAX_ICON_BATCH: usize = 32;
+    let mut result = HashMap::new();
+    let mut missing: Vec<(String, PathBuf)> = Vec::new();
+
+    {
+        let cache = state.app_icons.lock().unwrap();
+        for raw in paths.into_iter().take(MAX_ICON_BATCH) {
+            if let Some(cached) = cache.get(&raw) {
+                if let Some(url) = cached {
+                    result.insert(raw, url.clone());
+                }
+                continue;
+            }
+            if let Ok(canon) = is_allowed_shortcut_path(Path::new(&raw)) {
+                missing.push((raw, canon));
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(result);
+    }
+
+    #[cfg(windows)]
+    let extracted = tokio::task::spawn_blocking(move || {
+        missing
+            .into_iter()
+            .map(|(raw, canon)| {
+                let icon = crate::shelf::extract_shell_icon_data_url(&canon, 64, true);
+                (raw, icon)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    #[cfg(not(windows))]
+    let extracted: Vec<(String, Option<String>)> = Vec::new();
+
+    let mut cache = state.app_icons.lock().unwrap();
+    for (raw, icon) in extracted {
+        if let Some(url) = &icon {
+            result.insert(raw.clone(), url.clone());
+        }
+        cache.insert(raw, icon);
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn launch_app(path: String) -> Result<(), String> {
+    let canon = is_allowed_shortcut_path(Path::new(&path))?;
     #[cfg(windows)]
     return crate::windows::shell_launch_path(&canon);
     #[cfg(not(windows))]
@@ -1151,10 +1232,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let exe_file = dir.path().join("bad.exe");
         fs::write(&exe_file, b"mz").unwrap();
+        assert!(is_allowed_shortcut_path(&exe_file).is_err());
         assert!(launch_app(exe_file.to_string_lossy().to_string()).is_err());
 
         let outside_lnk = dir.path().join("outside.lnk");
         fs::write(&outside_lnk, b"lnk").unwrap();
+        assert!(is_allowed_shortcut_path(&outside_lnk).is_err());
         assert!(launch_app(outside_lnk.to_string_lossy().to_string()).is_err());
     }
 

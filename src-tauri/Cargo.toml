@@ -1,6 +1,6 @@
 [package]
 name = "peek"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [build-dependencies]
@@ -23,12 +23,14 @@ qrcode = { version = "0.15", default-features = false, features = ["svg"] }
 windows-core = "0.62.2"
 windows = { version = "0.62.2", features = [
   "ApplicationModel",
+  "Devices_Radios",
   "Foundation",
   "Foundation_Collections",
   "Globalization",
   "Graphics_Imaging",
   "Media_Control",
   "Media_Ocr",
+  "Networking_Connectivity",
   "Storage_Streams",
   "UI_Notifications",
   "UI_Notifications_Management",

@@ -5,6 +5,7 @@ mod capture;
 mod dev_monitor;
 #[cfg(windows)]
 mod drop_catcher;
+mod floating;
 mod island;
 mod local_api;
 mod lyrical;
@@ -226,6 +227,9 @@ fn main() {
             shelf::convert_shelf_image,
             shelf::start_file_drag,
             shelf::start_qr_transfer,
+            shelf::start_qr_receive,
+            shelf::get_qr_transfer,
+            shelf::allow_lan_firewall,
             shelf::stop_qr_transfer,
             capture::capture_full_display,
             capture::capture_active_window,
@@ -258,6 +262,15 @@ fn main() {
             system_controls::get_system_metrics,
             system_controls::snap_active_window,
             system_controls::open_windows_setting,
+            system_controls::get_connectivity_state,
+            system_controls::toggle_radio,
+            floating::open_floating_camera,
+            floating::open_floating_note,
+            floating::close_floating_window,
+            floating::start_floating_drag,
+            floating::resize_floating_window,
+            floating::set_floating_always_on_top,
+            floating::save_camera_snapshot,
             local_api::get_local_api_status,
             notifications::get_windows_notification_status,
             tools::get_clipboard_history,
@@ -280,6 +293,7 @@ fn main() {
             tools::add_reminder,
             tools::remove_reminder,
             tools::scan_installed_apps,
+            tools::get_app_icons,
             tools::launch_app,
             #[cfg(windows)]
             media::watch_media,
@@ -362,15 +376,11 @@ fn main() {
             let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Peek", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &hide, &settings, &quit])?;
-            let mut pixels = vec![0u8; 32 * 32 * 4];
-            for y in 6..26 {
-                for x in 3..29 {
-                    let index = (y * 32 + x) * 4;
-                    pixels[index..index + 4].copy_from_slice(&[225, 225, 225, 255]);
-                }
-            }
+            let tray_icon = load_tray_icon()
+                .or_else(|| app.default_window_icon().cloned())
+                .ok_or_else(|| std::io::Error::other("Missing Peek tray icon"))?;
             TrayIconBuilder::new()
-                .icon(Image::new_owned(pixels, 32, 32))
+                .icon(tray_icon)
                 .tooltip("Peek")
                 .menu(&menu)
                 .on_menu_event(|app, event| {
@@ -401,4 +411,30 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("Peek could not start");
+}
+
+fn load_tray_icon() -> Option<Image<'static>> {
+    const ICON_PNG: &[u8] = include_bytes!("../icons/64x64.png");
+    let decoded = image::load_from_memory_with_format(ICON_PNG, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    let (width, height) = decoded.dimensions();
+    Some(Image::new_owned(decoded.into_raw(), width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_icon_decodes_valid_rgba() {
+        let icon = load_tray_icon().expect("64x64 tray icon should decode");
+        assert_eq!(icon.width(), 64);
+        assert_eq!(icon.height(), 64);
+        let rgba = icon.rgba();
+        assert_eq!(rgba.len(), 64 * 64 * 4);
+        // Top-left corner outside the squircle and gripping paws remains transparent.
+        assert_eq!(rgba[3], 0);
+        assert!(rgba.chunks_exact(4).any(|px| px[3] == 255));
+    }
 }
