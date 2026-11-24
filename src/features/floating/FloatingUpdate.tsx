@@ -150,31 +150,29 @@ export function FloatingUpdate() {
       <footer className="float-upd-footer">
         <button
           type="button"
+          className="btn primary sm"
+          disabled={busy || !info}
+          onClick={() => void updater.install()}
+        >
+          <Download size={12} />
+          <span>{busy ? "Updating…" : "Update"}</span>
+        </button>
+        <button
+          type="button"
           className="btn sm"
           disabled={busy || !info}
           onClick={() => void updater.skip()}
         >
           Skip
         </button>
-        <div className="float-upd-footer-right">
-          <button
-            type="button"
-            className="btn sm"
-            disabled={busy}
-            onClick={() => void updater.dismiss()}
-          >
-            Later
-          </button>
-          <button
-            type="button"
-            className="btn primary sm"
-            disabled={busy || !info}
-            onClick={() => void updater.install()}
-          >
-            <Download size={12} />
-            <span>{busy ? "Updating…" : "Update now"}</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          className="btn sm"
+          disabled={busy}
+          onClick={() => void updater.dismiss()}
+        >
+          Later
+        </button>
       </footer>
     </div>
   );
