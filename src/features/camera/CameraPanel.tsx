@@ -5,14 +5,24 @@ import {
   Camera,
   CameraOff,
   FlipHorizontal2,
+  FolderOpen,
   PictureInPicture2,
+  Sparkles,
 } from "lucide-react";
+import { EnhancedCameraStage } from "./EnhancedCameraStage";
+import {
+  captureEnhancedSnapshot,
+  nextEnhanceMode,
+  openBestCameraStream,
+  type CameraEnhanceMode,
+} from "./cameraEnhance";
 
 type VideoDevice = { deviceId: string; label: string };
 
 export function CameraPanel() {
   const [cameraOn, setCameraOn] = useState(false);
   const [mirrored, setMirrored] = useState(true);
+  const [enhanceMode, setEnhanceMode] = useState<CameraEnhanceMode>("off");
   const [devices, setDevices] = useState<VideoDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [streamVersion, setStreamVersion] = useState(0);
@@ -71,13 +81,7 @@ export function CameraPanel() {
         return false;
       }
       try {
-        const videoConstraint: MediaTrackConstraints | boolean = deviceId
-          ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-          : { width: { ideal: 1280 }, height: { ideal: 720 } };
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: videoConstraint,
-          audio: false,
-        });
+        const stream = await openBestCameraStream(deviceId);
         streamRef.current = stream;
         setStreamVersion((v) => v + 1);
         setCameraOn(true);
@@ -122,19 +126,10 @@ export function CameraPanel() {
 
   async function takeSnapshot() {
     const video = videoRef.current;
-    if (!video || !cameraOn || video.videoWidth === 0 || video.videoHeight === 0) return;
+    if (!video || !cameraOn) return;
+    const dataUrl = captureEnhancedSnapshot(video, mirrored, enhanceMode);
+    if (!dataUrl) return;
     setError("");
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    if (mirrored) {
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-    }
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL("image/png");
     try {
       const file = await invoke<string>("save_camera_snapshot", { dataUrl });
       flash(`Saved ${file}`);
@@ -153,6 +148,7 @@ export function CameraPanel() {
       await invoke("open_floating_camera", {
         deviceId: selectedDeviceId || null,
         mirrored,
+        enhance: enhanceMode,
       });
     } catch (e) {
       setError(String(e));
@@ -163,12 +159,11 @@ export function CameraPanel() {
     <section aria-label="Toy Cam" className="camera-panel">
       <div className="camera-stage">
         {cameraOn ? (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className={"camera-video is-live" + (mirrored ? " is-mirrored" : "")}
+          <EnhancedCameraStage
+            videoRef={videoRef}
+            streamVersion={streamVersion}
+            mirrored={mirrored}
+            enhanceMode={enhanceMode}
           />
         ) : (
           <div className="camera-off-overlay">
@@ -205,6 +200,22 @@ export function CameraPanel() {
             <FlipHorizontal2 size={12} />
             <span>Mirror</span>
           </button>
+          <button
+            type="button"
+            className={"btn sm" + (enhanceMode !== "off" ? " primary" : "")}
+            title="Cycle camera enhance (Off / Natural / Studio)"
+            aria-label="Cycle camera enhance mode"
+            onClick={() => setEnhanceMode((m) => nextEnhanceMode(m))}
+          >
+            <Sparkles size={12} />
+            <span>
+              {enhanceMode === "off"
+                ? "Enhance"
+                : enhanceMode === "natural"
+                  ? "Natural"
+                  : "Studio"}
+            </span>
+          </button>
           {cameraOn && (
             <button
               type="button"
@@ -218,15 +229,29 @@ export function CameraPanel() {
           )}
         </div>
 
-        <button
-          type="button"
-          className="btn sm"
-          title="Open borderless floating camera window"
-          onClick={() => void popOutFloating()}
-        >
-          <PictureInPicture2 size={12} />
-          <span>Float</span>
-        </button>
+        <div className="camera-btn-group">
+          <button
+            type="button"
+            className="btn sm"
+            title="Open captures folder (Pictures\Peek)"
+            aria-label="Show captures folder"
+            onClick={() =>
+              void invoke("open_captures_folder").catch((e) => setError(String(e)))
+            }
+          >
+            <FolderOpen size={12} />
+            <span>Captures</span>
+          </button>
+          <button
+            type="button"
+            className="btn sm"
+            title="Open borderless floating camera window"
+            onClick={() => void popOutFloating()}
+          >
+            <PictureInPicture2 size={12} />
+            <span>Float</span>
+          </button>
+        </div>
       </div>
 
       {devices.length > 1 && (

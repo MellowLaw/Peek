@@ -1,5 +1,5 @@
 import type React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -28,10 +28,6 @@ import {
   SolidStopIcon,
 } from "./components/SolidIcons";
 import { AiPanel, computePinnedAiItems, useAiUsage } from "./features/ai/AiPanel";
-import { CameraPanel } from "./features/camera/CameraPanel";
-import { CapturePanel } from "./features/capture/CapturePanel";
-import { ControlsPanel } from "./features/controls/ControlsPanel";
-import { FilesPanel } from "./features/files/FilesPanel";
 import {
   IdleLyricsBar,
   MusicPanel,
@@ -39,13 +35,30 @@ import {
   useLyrical,
   useMedia,
 } from "./features/music/MusicPanel";
-import { NotificationsPanel } from "./features/notifications/NotificationsPanel";
-import { SettingsPanel } from "./features/settings/SettingsPanel";
-import { ToolsPanel } from "./features/tools/ToolsPanel";
 import { useActivity } from "./stores/activity";
 import { usePreferences } from "./stores/preferences";
 import { useUpdater } from "./stores/updater";
 import type { Accent, AutoCloseMode, Mode, OngoingBadge, PanelId, SizePreset } from "./types/peek";
+
+const FilesPanel = lazy(() => import("./features/files/FilesPanel").then((m) => ({ default: m.FilesPanel })));
+const CapturePanel = lazy(() =>
+  import("./features/capture/CapturePanel").then((m) => ({ default: m.CapturePanel })),
+);
+const CameraPanel = lazy(() =>
+  import("./features/camera/CameraPanel").then((m) => ({ default: m.CameraPanel })),
+);
+const ControlsPanel = lazy(() =>
+  import("./features/controls/ControlsPanel").then((m) => ({ default: m.ControlsPanel })),
+);
+const NotificationsPanel = lazy(() =>
+  import("./features/notifications/NotificationsPanel").then((m) => ({
+    default: m.NotificationsPanel,
+  })),
+);
+const SettingsPanel = lazy(() =>
+  import("./features/settings/SettingsPanel").then((m) => ({ default: m.SettingsPanel })),
+);
+const ToolsPanel = lazy(() => import("./features/tools/ToolsPanel").then((m) => ({ default: m.ToolsPanel })));
 
 const PANEL_META: Record<PanelId, { label: string; icon: typeof Music2 }> = {
   music: { label: "Music", icon: Music2 },
@@ -139,7 +152,7 @@ function logicalDimensions(
   }
 }
 
-function useClock(): string {
+function useClock(active: boolean): string {
   const formatNow = () =>
     new Date().toLocaleTimeString([], {
       hour: "numeric",
@@ -147,11 +160,20 @@ function useClock(): string {
     });
   const [clock, setClock] = useState(formatNow);
   useEffect(() => {
-    const timer = setInterval(() => {
-      setClock(formatNow());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
+    if (!active) return;
+    setClock(formatNow());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      const now = Date.now();
+      const msUntilNextMinute = Math.max(250, 60_000 - (now % 60_000) + 50);
+      timer = setTimeout(() => {
+        setClock(formatNow());
+        schedule();
+      }, msUntilNextMinute);
+    };
+    schedule();
+    return () => clearTimeout(timer);
+  }, [active]);
   return clock;
 }
 
@@ -269,7 +291,7 @@ export function App() {
   const [visible, setVisible] = useState(true);
   const [fileDragOver, setFileDragOver] = useState(false);
   const [draggedFiles, setDraggedFiles] = useState<string[]>([]);
-  const clockTime = useClock();
+  const clockTime = useClock(visible && mode !== "hidden");
 
   const { preferences, ready, load } = usePreferences();
   const activity = useActivity();
@@ -350,11 +372,14 @@ export function App() {
         targetWidthOverride?: number;
         prevPinnedCountOverride?: number;
         panelOverride?: PanelId;
+        preserveAutoClose?: boolean;
       },
     ) => {
       clearTimeout(hoverTimer.current);
       clearTimeout(leavePreviewTimer.current);
-      clearTimeout(autoCloseTimer.current);
+      if (!opts?.preserveAutoClose) {
+        clearTimeout(autoCloseTimer.current);
+      }
       clearTimeout(settleTimer.current);
 
       const prevMode = requestedMode.current;
@@ -486,15 +511,10 @@ export function App() {
     [aiUsage.snapshot, preferences.pinnedAiProviders, preferences.aiBudgets],
   );
 
-  const updatePromptActive =
-    (Boolean(updater.snapshot.available) && !updater.snapshot.dismissed) ||
-    updater.snapshot.status === "downloading" ||
-    updater.snapshot.status === "installing";
-
   const collapsedTargetMode: Mode =
     activity.ongoing.length > 0
       ? "compactBadge"
-      : activity.activeBanner || updatePromptActive
+      : activity.activeBanner
         ? "activity"
         : preferences.alwaysVisible
           ? mediaPlaying && preferences.lyricsEnabled && preferences.idleLyricsEnabled
@@ -530,25 +550,37 @@ export function App() {
     const el = expandedMeasureRef.current;
     if (!el) return;
     const maxH = MAX_EXPANDED_HEIGHT[preferences.sizePreset];
+    let rafId = 0;
     const measure = () => {
       const nextH = Math.min(maxH, Math.max(184, Math.ceil(el.getBoundingClientRect().height)));
       setExpandedHeight((prev) => {
-        if (Math.abs(prev - nextH) < 2) return prev;
+        if (Math.abs(prev - nextH) < 4) return prev;
         if (requestedMode.current === "expanded") {
           void changeMode("expanded", {
             focus: false,
             targetHeightOverride: nextH,
             panelOverride: panelRef.current,
+            preserveAutoClose: true,
           });
         }
         return nextH;
       });
     };
+    const scheduleMeasure = () => {
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        measure();
+      });
+    };
     measure();
-    const ro = new ResizeObserver(measure);
+    const ro = new ResizeObserver(scheduleMeasure);
     ro.observe(el);
-    return () => ro.disconnect();
-  }, [mode, panel, preferences.sizePreset, activity.ongoing.length, updatePromptActive, changeMode]);
+    return () => {
+      cancelAnimationFrame(rafId);
+      ro.disconnect();
+    };
+  }, [mode, panel, preferences.sizePreset, activity.ongoing.length, changeMode]);
 
   // Synchronize collapsed presentation when visibility setting, ongoing badge, or banner changes.
   useEffect(() => {
@@ -566,7 +598,7 @@ export function App() {
     if (prevSizePresetRef.current !== preferences.sizePreset) {
       prevSizePresetRef.current = preferences.sizePreset;
       if (requestedMode.current === "expanded") {
-        void changeMode("expanded", { focus: false });
+        void changeMode("expanded", { focus: false, preserveAutoClose: true });
       }
     }
   }, [ready, preferences.sizePreset, changeMode]);
@@ -581,7 +613,11 @@ export function App() {
     if (prevPanelIsMusicRef.current !== isMusic) {
       prevPanelIsMusicRef.current = isMusic;
       if (requestedMode.current === "expanded") {
-        void changeMode("expanded", { focus: false, panelOverride: panel });
+        void changeMode("expanded", {
+          focus: false,
+          panelOverride: panel,
+          preserveAutoClose: true,
+        });
       }
     }
   }, [ready, panel, changeMode]);
@@ -652,6 +688,35 @@ export function App() {
           openedForDragRef.current = false;
           openedByHoverRef.current = false;
           void changeMode(collapsedTargetRef.current);
+        }
+      }),
+      listen("expanded-cursor-outside", () => {
+        if (
+          requestedMode.current === "expanded" &&
+          (autoCloseModeRef.current === "leaveAndClick" || openedByHoverRef.current) &&
+          !draggingOutRef.current &&
+          !fileDragOverRef.current
+        ) {
+          const activeEl = document.activeElement as HTMLElement | null;
+          const tag = activeEl?.tagName;
+          const isTextInput =
+            tag === "INPUT" && (activeEl as HTMLInputElement).type !== "range";
+          if (tag === "SELECT" || tag === "TEXTAREA" || isTextInput) {
+            return;
+          }
+          clearTimeout(autoCloseTimer.current);
+          autoCloseTimer.current = setTimeout(() => {
+            if (
+              requestedMode.current === "expanded" &&
+              (autoCloseModeRef.current === "leaveAndClick" || openedByHoverRef.current) &&
+              !draggingOutRef.current &&
+              !fileDragOverRef.current
+            ) {
+              openedForDragRef.current = false;
+              openedByHoverRef.current = false;
+              void changeMode(collapsedTargetRef.current);
+            }
+          }, 90);
         }
       }),
       listen<FileDragPayload>("file-drag", ({ payload }) => {
@@ -748,6 +813,7 @@ export function App() {
     ((mode === "expanded" && panel === "music") || mode === "lyrics");
   const artworkUrl = musicThemeActive ? media.track.artwork : null;
   const albumPalette = useAlbumPalette(artworkUrl);
+  const blurredBgUrl = musicThemeActive ? albumPalette.blurredBgUrl : null;
   const dims = logicalDimensions(
     mode,
     preferences.sizePreset,
@@ -912,24 +978,20 @@ export function App() {
           {musicThemeActive && (
             <div className="music-bg-clip" aria-hidden="true">
               <div
-                className={"music-sway-bg" + (artworkUrl ? " has-art" : "")}
-                style={artworkUrl ? { backgroundImage: `url("${artworkUrl}")` } : undefined}
+                className={"music-sway-bg" + (blurredBgUrl ? " has-art" : "")}
+                style={blurredBgUrl ? { backgroundImage: `url("${blurredBgUrl}")` } : undefined}
               />
             </div>
           )}
           <motion.div
             key={contentViewKey}
             className="notch-inner"
-            initial={
-              reduceMotion
-                ? false
-                : { opacity: 0, scale: 0.96, filter: "blur(3px)" }
-            }
-            animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
+            initial={reduceMotion ? false : { opacity: 0, scale: 0.985 }}
+            animate={{ opacity: 1, scale: 1 }}
             transition={
               reduceMotion
                 ? { duration: 0 }
-                : { duration: 0.16, ease: [0.22, 1, 0.36, 1] }
+                : { duration: 0.14, ease: [0.22, 1, 0.36, 1] }
             }
           >
             {mode === "hidden" ? (
@@ -964,61 +1026,6 @@ export function App() {
                 >
                   <X size={14} />
                 </button>
-              </div>
-            ) : mode === "activity" && updatePromptActive ? (
-              <div
-                className="update-pill-prompt"
-                role="status"
-                onClick={() => openPanel("settings")}
-              >
-                <div className="update-pill-text">
-                  <strong>
-                    {updater.snapshot.status === "installing"
-                      ? "Installing update…"
-                      : updater.snapshot.status === "downloading"
-                        ? `Updating ${updater.snapshot.progressPercent ?? 0}%`
-                        : `Peek v${updater.snapshot.available?.version} ready`}
-                  </strong>
-                  {updater.snapshot.status === "downloading" ? (
-                    <div className="update-progress-track">
-                      <div
-                        className="update-progress-fill"
-                        style={{ width: `${updater.snapshot.progressPercent ?? 0}%` }}
-                      />
-                    </div>
-                  ) : (
-                    <span>
-                      {updater.snapshot.status === "installing"
-                        ? "Restarting automatically"
-                        : "Signed Windows update"}
-                    </span>
-                  )}
-                </div>
-                {updater.snapshot.status !== "downloading" &&
-                  updater.snapshot.status !== "installing" && (
-                    <div className="update-pill-actions">
-                      <button
-                        type="button"
-                        className="btn primary sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void updater.install();
-                        }}
-                      >
-                        Update
-                      </button>
-                      <button
-                        type="button"
-                        className="btn sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void updater.dismiss();
-                        }}
-                      >
-                        Later
-                      </button>
-                    </div>
-                  )}
               </div>
             ) : mode === "preview" ? (
               <div className="hover-bar" aria-label="Peek quick bar">
@@ -1112,6 +1119,9 @@ export function App() {
                 style={{ "--panel-max-h": `${maxPanelHeight}px` } as CSSProperties}
                 onPointerDown={() => {
                   openedByHoverRef.current = false;
+                  if (!document.hasFocus()) {
+                    void invoke("focus_island_window").catch(() => {});
+                  }
                 }}
               >
                 <header className="island-header">
@@ -1176,119 +1186,70 @@ export function App() {
                   </div>
                 )}
 
-                {updatePromptActive && (
-                  <div className="update-banner" role="status">
-                    <div className="update-banner-top">
-                      <div className="update-banner-text">
-                        <strong>
-                          {updater.snapshot.status === "installing"
-                            ? "Installing Peek update…"
-                            : updater.snapshot.status === "downloading"
-                              ? `Downloading Peek v${updater.snapshot.available?.version} (${updater.snapshot.progressPercent ?? 0}%)`
-                              : `Peek v${updater.snapshot.available?.version} available`}
-                        </strong>
-                        {updater.snapshot.available?.notes &&
-                          updater.snapshot.status === "available" && (
-                            <span>{updater.snapshot.available.notes}</span>
-                          )}
-                      </div>
-                      {updater.snapshot.status !== "downloading" &&
-                        updater.snapshot.status !== "installing" && (
-                          <div className="update-banner-actions">
-                            <button
-                              type="button"
-                              className="btn primary sm"
-                              onClick={() => void updater.install()}
-                            >
-                              Update now
-                            </button>
-                            <button
-                              type="button"
-                              className="btn sm"
-                              onClick={() => void updater.dismiss()}
-                            >
-                              Later
-                            </button>
-                          </div>
-                        )}
-                    </div>
-                    {updater.snapshot.status === "downloading" && (
-                      <div className="update-progress-track">
-                        <div
-                          className="update-progress-fill"
-                          style={{ width: `${updater.snapshot.progressPercent ?? 0}%` }}
-                        />
-                      </div>
-                    )}
-                  </div>
-                )}
-
                 <AnimatePresence mode="wait" initial={false}>
                   <motion.div
                     key={panel}
                     initial={
-                      reduceMotion
-                        ? { opacity: 1 }
-                        : { opacity: 0, y: 5, scale: 0.99, filter: "blur(3px)" }
+                      reduceMotion ? { opacity: 1 } : { opacity: 0, y: 4, scale: 0.99 }
                     }
-                    animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={
-                      reduceMotion
-                        ? { opacity: 0 }
-                        : { opacity: 0, y: -3, scale: 0.99, filter: "blur(2px)" }
+                      reduceMotion ? { opacity: 0 } : { opacity: 0, y: -3, scale: 0.99 }
                     }
                     transition={
                       reduceMotion
                         ? { duration: 0 }
-                        : { duration: 0.14, ease: [0.22, 1, 0.36, 1] }
+                        : { duration: 0.13, ease: [0.22, 1, 0.36, 1] }
                     }
                     className={
                       "panel-content" + (activity.ongoing.length > 0 ? " with-ongoing" : "")
                     }
                   >
-                    {panel === "settings" ? (
-                      <SettingsPanel />
-                    ) : panel === "music" ? (
-                      <MusicPanel
-                        snapshot={media}
-                        lyrical={lyrical}
-                        accentRgb={albumPalette.accentRgb}
-                      />
-                    ) : panel === "ai" ? (
-                      <AiPanel
-                        snapshot={aiUsage.snapshot}
-                        error={aiUsage.error}
-                        onRefresh={aiUsage.refresh}
-                      />
-                    ) : panel === "files" ? (
-                      <FilesPanel
-                        isDragOver={fileDragOver}
-                        draggedPaths={draggedFiles}
-                        onDraggingOutChange={(dragging) => {
-                          draggingOutRef.current = dragging;
-                        }}
-                      />
-                    ) : panel === "capture" ? (
-                      <CapturePanel />
-                    ) : panel === "camera" ? (
-                      <CameraPanel />
-                    ) : panel === "controls" ? (
-                      <ControlsPanel />
-                    ) : panel === "notifications" ? (
-                      <NotificationsPanel />
-                    ) : (
-                      <ToolsPanel
-                        section={
-                          panel === "clipboard" ||
-                          panel === "timer" ||
-                          panel === "notes" ||
-                          panel === "launcher"
-                            ? panel
-                            : "clipboard"
-                        }
-                        onNavigate={setPanel}
-                      />
-                    )}
+                    <Suspense fallback={<div className="panel-loading" />}>
+                      {panel === "settings" ? (
+                        <SettingsPanel />
+                      ) : panel === "music" ? (
+                        <MusicPanel
+                          snapshot={media}
+                          lyrical={lyrical}
+                          accentRgb={albumPalette.accentRgb}
+                        />
+                      ) : panel === "ai" ? (
+                        <AiPanel
+                          snapshot={aiUsage.snapshot}
+                          error={aiUsage.error}
+                          onRefresh={aiUsage.refresh}
+                        />
+                      ) : panel === "files" ? (
+                        <FilesPanel
+                          isDragOver={fileDragOver}
+                          draggedPaths={draggedFiles}
+                          onDraggingOutChange={(dragging) => {
+                            draggingOutRef.current = dragging;
+                          }}
+                        />
+                      ) : panel === "capture" ? (
+                        <CapturePanel />
+                      ) : panel === "camera" ? (
+                        <CameraPanel />
+                      ) : panel === "controls" ? (
+                        <ControlsPanel />
+                      ) : panel === "notifications" ? (
+                        <NotificationsPanel />
+                      ) : (
+                        <ToolsPanel
+                          section={
+                            panel === "clipboard" ||
+                            panel === "timer" ||
+                            panel === "notes" ||
+                            panel === "launcher"
+                              ? panel
+                              : "clipboard"
+                          }
+                          onNavigate={setPanel}
+                        />
+                      )}
+                    </Suspense>
                   </motion.div>
                 </AnimatePresence>
               </div>

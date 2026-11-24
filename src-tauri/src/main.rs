@@ -32,6 +32,8 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::preferences::{Preferences, PreferencesState, ShortcutStates, ShortcutsState};
 
+pub(crate) const PEEK_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-networking --disable-component-update --disable-sync";
+
 static LAST_DRAG_OVER_MS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Serialize)]
@@ -202,11 +204,13 @@ fn main() {
             island::set_island_mode,
             island::prepare_island_transition,
             island::settle_island_transition,
+            island::focus_island_window,
             island::list_monitors,
             shortcut_available,
             preferences::get_preferences,
             preferences::save_preferences,
             preferences::shortcut_states,
+            preferences::get_autostart_status,
             activity::get_activity_hub,
             activity::dismiss_activity,
             activity::dismiss_notification,
@@ -235,12 +239,16 @@ fn main() {
             capture::capture_active_window,
             capture::begin_screen_overlay,
             capture::get_overlay_state,
+            capture::switch_overlay_mode,
             capture::complete_overlay_region,
+            capture::complete_overlay_fullscreen,
+            capture::complete_overlay_window,
             capture::complete_overlay_color,
             capture::cancel_overlay,
             capture::ocr_image_file,
             capture::reveal_capture_file,
             capture::open_recordings_folder,
+            capture::open_captures_folder,
             capture::list_audio_inputs,
             capture::start_recording,
             capture::pause_recording,
@@ -266,8 +274,10 @@ fn main() {
             system_controls::toggle_radio,
             floating::open_floating_camera,
             floating::open_floating_note,
+            floating::open_floating_update,
             floating::close_floating_window,
             floating::start_floating_drag,
+            floating::start_floating_resize,
             floating::resize_floating_window,
             floating::set_floating_always_on_top,
             floating::save_camera_snapshot,
@@ -307,6 +317,7 @@ fn main() {
             updater::check_for_updates,
             updater::install_available_update,
             updater::dismiss_update_prompt,
+            updater::skip_available_update,
             quit_app
         ])
         .setup(|app| {
@@ -337,6 +348,8 @@ fn main() {
             app.manage(PreferencesState(std::sync::Mutex::new(
                 initial_prefs.clone(),
             )));
+            #[cfg(windows)]
+            windows::sync_autostart_if_needed(initial_prefs.autostart);
             if initial_prefs.local_api_enabled {
                 let app_handle = app.handle().clone();
                 let port = initial_prefs.local_api_port;
@@ -360,6 +373,7 @@ fn main() {
                 app.handle().clone(),
                 initial_prefs.always_visible,
             ));
+            app.manage(island::start_expanded_watchdog(app.handle().clone()));
 
             #[cfg(windows)]
             {
@@ -405,6 +419,8 @@ fn main() {
                     }
                 })
                 .build(app)?;
+            #[cfg(windows)]
+            windows::set_webview_transparent_bg(&window);
             window.show()?;
             island::restore_frameless_after_show(&window).map_err(std::io::Error::other)?;
             Ok(())

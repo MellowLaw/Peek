@@ -52,6 +52,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
     codexWeeklyTokens: 150_000_000,
   },
   cameraPanelAdded: true,
+  skippedUpdateVersion: "",
 };
 
 const DEFAULT_SHORTCUTS: ShortcutStates = {

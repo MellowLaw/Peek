@@ -106,6 +106,8 @@ pub struct Preferences {
     pub ai_budgets: ProviderBudgets,
     #[serde(default)]
     pub camera_panel_added: bool,
+    #[serde(default)]
+    pub skipped_update_version: String,
 }
 
 fn default_true() -> bool {
@@ -142,6 +144,7 @@ impl Default for Preferences {
             pinned_ai_providers: Vec::new(),
             ai_budgets: ProviderBudgets::default(),
             camera_panel_added: true,
+            skipped_update_version: String::new(),
         }
     }
 }
@@ -291,6 +294,29 @@ pub fn get_preferences(
 #[tauri::command]
 pub fn shortcut_states(state: tauri::State<'_, ShortcutsState>) -> ShortcutStates {
     state.0.lock().unwrap().clone()
+}
+
+#[cfg(windows)]
+#[tauri::command]
+pub fn get_autostart_status(
+    state: tauri::State<'_, PreferencesState>,
+) -> crate::windows::AutostartStatus {
+    let enabled = state.0.lock().unwrap().autostart;
+    crate::windows::inspect_autostart(enabled)
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn get_autostart_status(state: tauri::State<'_, PreferencesState>) -> serde_json::Value {
+    let enabled = state.0.lock().unwrap().autostart;
+    serde_json::json!({
+        "enabledInPrefs": enabled,
+        "registered": false,
+        "pathMatches": false,
+        "targetExists": false,
+        "disabledByWindows": false,
+        "registeredPath": ""
+    })
 }
 
 #[tauri::command]

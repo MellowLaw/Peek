@@ -1,6 +1,5 @@
 import { useRef } from "react";
 
-const TICK_COUNT = 27;
 const MIN_DEG = -135;
 const MAX_DEG = 135;
 const SWEEP_DEG = MAX_DEG - MIN_DEG;
@@ -9,6 +8,8 @@ export function AmpKnob({
   value,
   muted,
   disabled,
+  size = "md",
+  ariaLabel = "Master volume amplifier dial",
   onChange,
   onDragStart,
   onDragEnd,
@@ -17,11 +18,19 @@ export function AmpKnob({
   value: number;
   muted: boolean;
   disabled?: boolean;
+  size?: "md" | "sm";
+  ariaLabel?: string;
   onChange: (next: number) => void;
   onDragStart?: () => void;
   onDragEnd?: () => void;
   onToggleMute?: () => void;
 }) {
+  const isSm = size === "sm";
+  const tickCount = isSm ? 19 : 27;
+  const snapDist = isSm ? 9 : 14;
+  const moveDist = isSm ? 5 : 8;
+  const wheelStep = isSm ? 4 : 3;
+
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{
     prevAngle: number | null;
@@ -56,12 +65,21 @@ export function AmpKnob({
     return { dist, deg };
   }
 
+  const dims = isSm
+    ? { w: 74, h: 70, vb: "0 0 92 86", cx: 46, cy: 42, tickY: 6, tickW: 2.2, tickH: 7.2, knobR: 23.5, triTop: 21.5, triBot: 27.5, triHalf: 3, textY: 79, textSize: 10.5 }
+    : { w: 112, h: 104, vb: "0 0 120 112", cx: 60, cy: 56, tickY: 7, tickW: 2.6, tickH: 9.5, knobR: 33.5, triTop: 27.5, triBot: 35.5, triHalf: 3.8, textY: 104, textSize: 11.5 };
+
   return (
     <div
-      className={"amp-knob" + (disabled ? " is-disabled" : "") + (muted ? " is-muted" : "")}
+      className={
+        "amp-knob" +
+        (isSm ? " is-sm" : "") +
+        (disabled ? " is-disabled" : "") +
+        (muted ? " is-muted" : "")
+      }
       role="slider"
       tabIndex={disabled ? -1 : 0}
-      aria-label="Master volume amplifier dial"
+      aria-label={ariaLabel}
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={clamped}
@@ -71,7 +89,7 @@ export function AmpKnob({
         e.preventDefault();
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
         const polar = getPolar(e.clientX, e.clientY);
-        if (polar && polar.dist >= 14 && polar.deg >= -145 && polar.deg <= 145) {
+        if (polar && polar.dist >= snapDist && polar.deg >= -145 && polar.deg <= 145) {
           const snapped = clampDeg(polar.deg);
           const nextVal = degToVal(snapped);
           if (nextVal !== clamped) onChange(nextVal);
@@ -82,7 +100,7 @@ export function AmpKnob({
           };
         } else {
           dragRef.current = {
-            prevAngle: polar && polar.dist >= 8 ? polar.deg : null,
+            prevAngle: polar && polar.dist >= moveDist ? polar.deg : null,
             virtualDeg: MIN_DEG + (clamped / 100) * SWEEP_DEG,
             lastEmitted: clamped,
           };
@@ -93,7 +111,7 @@ export function AmpKnob({
         const drag = dragRef.current;
         if (!drag || disabled) return;
         const polar = getPolar(e.clientX, e.clientY);
-        if (!polar || polar.dist < 8) return;
+        if (!polar || polar.dist < moveDist) return;
         if (drag.prevAngle === null) {
           drag.prevAngle = polar.deg;
           return;
@@ -128,7 +146,7 @@ export function AmpKnob({
       onWheel={(e) => {
         if (disabled) return;
         e.preventDefault();
-        const delta = e.deltaY < 0 ? 3 : -3;
+        const delta = e.deltaY < 0 ? wheelStep : -wheelStep;
         onChange(clampVal(clamped + delta));
       }}
       onKeyDown={(e) => {
@@ -145,43 +163,52 @@ export function AmpKnob({
         }
       }}
     >
-      <svg ref={svgRef} viewBox="0 0 120 112" width="112" height="104" aria-hidden="true">
-        {Array.from({ length: TICK_COUNT }, (_, idx) => {
-          const frac = idx / (TICK_COUNT - 1);
+      <svg
+        ref={svgRef}
+        viewBox={dims.vb}
+        width={dims.w}
+        height={dims.h}
+        aria-hidden="true"
+      >
+        {Array.from({ length: tickCount }, (_, idx) => {
+          const frac = idx / (tickCount - 1);
           const angle = MIN_DEG + frac * SWEEP_DEG;
           const active = !muted && clamped > 0 && frac <= activeRatio + 0.001;
           return (
             <rect
               key={idx}
-              x="58.7"
-              y="7"
-              width="2.6"
-              height="9.5"
-              rx="1.3"
+              x={dims.cx - dims.tickW / 2}
+              y={dims.tickY}
+              width={dims.tickW}
+              height={dims.tickH}
+              rx={dims.tickW / 2}
               fill={active ? "#f4f4f4" : "#2f2f2f"}
-              transform={`rotate(${angle} 60 56)`}
+              transform={`rotate(${angle} ${dims.cx} ${dims.cy})`}
             />
           );
         })}
 
         <circle
-          cx="60"
-          cy="56"
-          r="33.5"
+          cx={dims.cx}
+          cy={dims.cy}
+          r={dims.knobR}
           fill="#0a0a0a"
           stroke={muted ? "#343434" : "#f4f4f4"}
-          strokeWidth="2"
+          strokeWidth={isSm ? "1.75" : "2"}
         />
 
-        <g transform={`rotate(${knobAngle} 60 56)`}>
-          <path d="M 60 27.5 L 63.8 35.5 L 56.2 35.5 Z" fill={muted ? "#666666" : "#ffffff"} />
+        <g transform={`rotate(${knobAngle} ${dims.cx} ${dims.cy})`}>
+          <path
+            d={`M ${dims.cx} ${dims.triTop} L ${dims.cx + dims.triHalf} ${dims.triBot} L ${dims.cx - dims.triHalf} ${dims.triBot} Z`}
+            fill={muted ? "#666666" : "#ffffff"}
+          />
         </g>
 
         <text
-          x="60"
-          y="104"
+          x={dims.cx}
+          y={dims.textY}
           textAnchor="middle"
-          fontSize="11.5"
+          fontSize={dims.textSize}
           fontWeight="700"
           fill={muted ? "#8f8f8f" : "#f4f4f4"}
           style={{ fontVariantNumeric: "tabular-nums" }}

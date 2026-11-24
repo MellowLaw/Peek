@@ -34,6 +34,8 @@ impl Default for CurrentLogicalSize {
 
 pub struct VisibilityWatcher(pub watch::Sender<bool>);
 
+pub struct ExpandedWatchdog(pub std::sync::Arc<tokio::sync::Notify>);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
@@ -131,6 +133,10 @@ fn ear_logical_for(mode: Mode) -> f64 {
     } else {
         EAR_LOGICAL_PX
     }
+}
+
+fn is_dormant_mode(mode: Mode) -> bool {
+    matches!(mode, Mode::Hidden | Mode::Idle | Mode::CompactBadge)
 }
 
 fn stage_physical_bounds(metrics: MonitorMetrics) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
@@ -280,7 +286,13 @@ pub fn initialize(
     let metrics = monitor_metrics(window, monitor_name)?;
     let (pos, stage_size) = stage_physical_bounds(metrics);
     #[cfg(windows)]
-    crate::windows::anchor_island_stage(window, pos, stage_size)?;
+    {
+        crate::windows::anchor_island_stage(window, pos, stage_size)?;
+        crate::windows::set_webview_transparent_bg(window);
+        if !always_visible {
+            crate::windows::set_webview_memory_low(window, true);
+        }
+    }
     #[cfg(not(windows))]
     {
         window.set_size(stage_size).map_err(|e| e.to_string())?;
@@ -394,6 +406,61 @@ pub fn sync_visibility(app: &AppHandle, always_visible: bool) {
     }
 }
 
+pub fn start_expanded_watchdog(app: AppHandle) -> ExpandedWatchdog {
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let rx = notify.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            rx.notified().await;
+            let mut outside_ticks: u8 = 0;
+            let mut last_emit = Instant::now() - Duration::from_secs(5);
+            while *app.state::<CurrentMode>().0.lock().unwrap() == Mode::Expanded {
+                #[cfg(windows)]
+                {
+                    if let (Some(win), Some((cx, cy)), Some((l, t, r, b, scale))) = (
+                        app.get_webview_window("main"),
+                        crate::windows::cursor_position(),
+                        monitor_notch_rect(&app, Mode::Expanded),
+                    ) {
+                        let pad = (14.0 * scale).round() as i32;
+                        let inside = cx >= l - pad && cx <= r + pad && cy >= t - 6 && cy <= b + pad;
+                        if !inside
+                            && !crate::windows::left_mouse_down()
+                            && !crate::windows::is_auto_close_suppressed()
+                        {
+                            outside_ticks = outside_ticks.saturating_add(1);
+                            if outside_ticks >= 2
+                                && last_emit.elapsed() > Duration::from_millis(260)
+                            {
+                                last_emit = Instant::now();
+                                outside_ticks = 0;
+                                let _ = win.emit("expanded-cursor-outside", ());
+                            }
+                        } else {
+                            outside_ticks = 0;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(70)).await;
+            }
+        }
+    });
+    ExpandedWatchdog(notify)
+}
+
+#[tauri::command]
+pub fn focus_island_window(window: WebviewWindow) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::windows::enforce_frameless_popup(&window, true)?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window.set_focusable(true);
+    }
+    window.set_focus().map_err(|e| e.to_string())
+}
+
 pub async fn reanchor(app: &AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
@@ -504,6 +571,11 @@ pub async fn prepare_island_transition(
 
     let expanded = matches!(mode, Mode::Expanded);
     let should_focus = expanded && focus.unwrap_or(true);
+    if expanded {
+        if let Some(wd) = app.try_state::<ExpandedWatchdog>() {
+            wd.0.notify_one();
+        }
+    }
     if should_focus {
         #[cfg(windows)]
         {
@@ -535,7 +607,10 @@ pub async fn prepare_island_transition(
                 return;
             }
             #[cfg(windows)]
-            let res =
+            let res = {
+                if !is_dormant_mode(mode) {
+                    crate::windows::set_webview_memory_low(&target, false);
+                }
                 crate::windows::enforce_frameless_popup(&target, should_focus).and_then(|_| {
                     crate::windows::set_island_region(
                         &target,
@@ -547,7 +622,8 @@ pub async fn prepare_island_transition(
                         0,
                         false,
                     )
-                });
+                })
+            };
             #[cfg(not(windows))]
             let res = {
                 let _ = (stage_size, canvas_w, canvas_h);
@@ -602,9 +678,15 @@ pub async fn settle_island_transition(
                 return;
             }
             #[cfg(windows)]
-            let res = crate::windows::enforce_frameless_popup(&target, focusable)
-                .and_then(|_| apply_settled_region(&target, mode, next_w, next_h, metrics))
-                .map(|_| true);
+            let res = {
+                let res = crate::windows::enforce_frameless_popup(&target, focusable)
+                    .and_then(|_| apply_settled_region(&target, mode, next_w, next_h, metrics))
+                    .map(|_| true);
+                if res.is_ok() {
+                    crate::windows::set_webview_memory_low(&target, is_dormant_mode(mode));
+                }
+                res
+            };
             #[cfg(not(windows))]
             let res = apply_settled_region(&target, mode, next_w, next_h, metrics).and_then(|_| {
                 target
@@ -637,6 +719,9 @@ pub async fn set_island_mode(
     let metrics = monitor_metrics(&window, &preferred_monitor)?;
     let expanded = matches!(mode, Mode::Expanded);
     if expanded {
+        if let Some(wd) = app.try_state::<ExpandedWatchdog>() {
+            wd.0.notify_one();
+        }
         #[cfg(windows)]
         {
             let hwnds = crate::windows::peek_hwnds(&app);
@@ -661,14 +746,20 @@ pub async fn set_island_mode(
                 return;
             }
             #[cfg(windows)]
-            let result = crate::windows::enforce_frameless_popup(&target, expanded)
-                .and_then(|_| apply_settled_region(&target, mode, w, h, metrics))
-                .and_then(|_| {
-                    if expanded {
-                        target.set_focus().map_err(|error| error.to_string())?;
-                    }
-                    Ok(true)
-                });
+            let result = {
+                let res = crate::windows::enforce_frameless_popup(&target, expanded)
+                    .and_then(|_| apply_settled_region(&target, mode, w, h, metrics))
+                    .and_then(|_| {
+                        if expanded {
+                            target.set_focus().map_err(|error| error.to_string())?;
+                        }
+                        Ok(true)
+                    });
+                if res.is_ok() {
+                    crate::windows::set_webview_memory_low(&target, is_dormant_mode(mode));
+                }
+                res
+            };
             #[cfg(not(windows))]
             let result = apply_settled_region(&target, mode, w, h, metrics).and_then(|_| {
                 target
@@ -720,5 +811,17 @@ mod tests {
                 assert!(b >= 2);
             }
         }
+    }
+
+    #[test]
+    fn dormant_mode_only_throttles_idle_hidden_and_compact_badge() {
+        assert!(is_dormant_mode(Mode::Hidden));
+        assert!(is_dormant_mode(Mode::Idle));
+        assert!(is_dormant_mode(Mode::CompactBadge));
+        assert!(!is_dormant_mode(Mode::Lyrics));
+        assert!(!is_dormant_mode(Mode::Preview));
+        assert!(!is_dormant_mode(Mode::Activity));
+        assert!(!is_dormant_mode(Mode::Expanded));
+        assert!(!is_dormant_mode(Mode::DragTarget));
     }
 }

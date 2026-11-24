@@ -73,6 +73,7 @@ export type AlbumPalette = {
   earLeft: [number, number, number];
   earRight: [number, number, number];
   accentRgb: string;
+  blurredBgUrl: string | null;
 };
 
 type Action = "previous" | "playPause" | "next";
@@ -104,6 +105,7 @@ const DEFAULT_PALETTE: AlbumPalette = {
   earLeft: [24, 34, 52],
   earRight: [20, 28, 44],
   accentRgb: "180, 224, 255",
+  blurredBgUrl: null,
 };
 
 function shadeFromBlurredQuadrant(
@@ -315,7 +317,24 @@ export function useAlbumPalette(artwork: string | null): AlbumPalette {
         const earRight = shadeFromBlurredQuadrant(trR, trG, trB, trN, deep);
         const accentRgb = makeVibrantAccent(rawPrimary[0], rawPrimary[1], rawPrimary[2]);
 
-        setPalette({ c1, c2, deep, earLeft, earRight, accentRgb });
+        let blurredBgUrl: string | null = null;
+        try {
+          const bgCanvas = document.createElement("canvas");
+          bgCanvas.width = 128;
+          bgCanvas.height = 128;
+          const bgCtx = bgCanvas.getContext("2d");
+          if (bgCtx) {
+            bgCtx.fillStyle = `rgb(${deep[0]}, ${deep[1]}, ${deep[2]})`;
+            bgCtx.fillRect(0, 0, 128, 128);
+            bgCtx.filter = "blur(10px) brightness(0.62) saturate(2.25) contrast(1.08)";
+            bgCtx.drawImage(img, -14, -14, 156, 156);
+            blurredBgUrl = bgCanvas.toDataURL("image/jpeg", 0.72);
+          }
+        } catch {
+          blurredBgUrl = null;
+        }
+
+        setPalette({ c1, c2, deep, earLeft, earRight, accentRgb, blurredBgUrl });
       } catch {
         setPalette(DEFAULT_PALETTE);
       }
@@ -535,6 +554,7 @@ function LyricalViewport({
   const viewportRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const letterSpansRef = useRef<HTMLSpanElement[][]>([]);
   const particlesRef = useRef<SparkParticle[]>([]);
   const clockRef = useRef(new PlaybackClock());
   const onTargetWidthChangeRef = useRef(onTargetWidthChange);
@@ -585,7 +605,11 @@ function LyricalViewport({
     particlesRef.current = [];
     lastActiveIdxRef.current = -999;
     lastReportedWidthRef.current = -1;
-  }, [linesKey]);
+    letterSpansRef.current = displayLines.map((_, i) => {
+      const el = lineRefs.current[i];
+      return el ? Array.from(el.querySelectorAll<HTMLSpanElement>(".lyrical-letter")) : [];
+    });
+  }, [displayLines, linesKey]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -607,6 +631,9 @@ function LyricalViewport({
     lastReportedWidthRef.current = -1;
     let rafId = 0;
     let frameCount = 0;
+    let prevStyledActiveIdx = -999;
+    let prevStyledDisplayIdx = -999;
+    let prevVpHeight = -1;
 
     const applyFrame = () => {
       const viewport = viewportRef.current;
@@ -669,71 +696,109 @@ function LyricalViewport({
         }
       }
 
-      let targetY = 0;
-      if (!singleLine) {
-        const activeElem = activeIdx >= 0 ? lineRefs.current[activeIdx] : null;
-        if (activeElem) {
-          targetY = activeElem.offsetTop - vpHeight / 2 + activeElem.clientHeight / 2;
+      const lineStateChanged =
+        activeIdx !== prevStyledActiveIdx ||
+        displayIdx !== prevStyledDisplayIdx ||
+        vpHeight !== prevVpHeight;
+
+      if (lineStateChanged) {
+        prevStyledActiveIdx = activeIdx;
+        prevStyledDisplayIdx = displayIdx;
+        prevVpHeight = vpHeight;
+
+        let targetY = 0;
+        if (!singleLine) {
+          const activeElem = activeIdx >= 0 ? lineRefs.current[activeIdx] : null;
+          if (activeElem) {
+            targetY = activeElem.offsetTop - vpHeight / 2 + activeElem.clientHeight / 2;
+          }
+        }
+
+        for (let i = 0; i < displayLines.length; i++) {
+          const el = lineRefs.current[i];
+          if (!el) continue;
+
+          const isCurrent = singleLine ? i === displayIdx : i === activeIdx;
+          el.classList.toggle("active", isCurrent);
+          el.classList.toggle("past", singleLine ? i < displayIdx : i < activeIdx);
+
+          if (singleLine) {
+            const near = displayIdx === -1 ? i === 0 : Math.abs(i - displayIdx) <= 1;
+            el.style.visibility = near ? "visible" : "hidden";
+            el.style.pointerEvents = isCurrent ? "auto" : "none";
+            el.style.filter = "none";
+            el.style.transitionDelay = "0s";
+            if (i === displayIdx) {
+              el.style.transform = "translateY(0px) scale(1)";
+              el.style.opacity = "1";
+            } else if (i < displayIdx) {
+              el.style.transform = "translateY(-22px) scale(0.96)";
+              el.style.opacity = "0";
+            } else {
+              el.style.transform = "translateY(22px) scale(0.96)";
+              el.style.opacity = "0";
+            }
+          } else {
+            const far = activeIdx >= 0 && Math.abs(i - activeIdx) > 10;
+            el.style.visibility = far ? "hidden" : "visible";
+            el.style.pointerEvents = far ? "none" : "auto";
+            el.style.opacity = "";
+            if (reduceMotion || far || activeIdx === -1 || i === activeIdx) {
+              el.style.filter = "none";
+            } else {
+              const dist = Math.abs(i - activeIdx);
+              el.style.filter = `blur(${Math.min(dist * 0.65, 2.2).toFixed(2)}px)`;
+            }
+
+            const cascadeDelay =
+              !reduceMotion && !far && activeIdx !== -1 && i > activeIdx
+                ? Math.min((i - activeIdx) * 0.045, 0.36)
+                : 0;
+            if (i === activeIdx) {
+              el.style.transform = `translateY(${(-targetY).toFixed(1)}px) scale(1.035)`;
+            } else if (i < activeIdx) {
+              el.style.transform = `translateY(${(-targetY - 6).toFixed(1)}px) scale(0.92)`;
+            } else {
+              el.style.transform = `translateY(${(-targetY + 8).toFixed(1)}px) scale(0.94)`;
+            }
+            el.style.transitionDelay = `0s, ${cascadeDelay.toFixed(3)}s, 0s, ${cascadeDelay.toFixed(3)}s`;
+          }
+
+          const entry = displayLines[i];
+          if (i !== activeIdx && !entry.isIntroDots) {
+            const letterSpans = letterSpansRef.current[i] ?? [];
+            const dimColor =
+              i < activeIdx ? "rgba(255, 255, 255, 0.18)" : "rgba(255, 255, 255, 0.4)";
+            for (let w = 0; w < letterSpans.length; w++) {
+              const sp = letterSpans[w];
+              sp.style.color = dimColor;
+              sp.style.textShadow = "none";
+              sp.style.background = "";
+              sp.style.backgroundClip = "";
+              sp.style.webkitBackgroundClip = "";
+              sp.style.webkitTextFillColor = "";
+              sp.style.transform = "";
+            }
+          }
         }
       }
 
+      const sparkInterval = singleLine ? 6 : 4;
+      const maxSparks = singleLine ? 8 : 18;
+      if (!reduceMotion && track.playing) {
+        frameCount += 1;
+      }
+      const needSparkRect =
+        !reduceMotion &&
+        track.playing &&
+        frameCount % sparkInterval === 0 &&
+        particlesRef.current.length < maxSparks;
+
       let activeLetterRect: { x: number; y: number; w: number; h: number } | null = null;
-      const vpRect = viewport.getBoundingClientRect();
-
-      for (let i = 0; i < displayLines.length; i++) {
-        const el = lineRefs.current[i];
-        if (!el) continue;
-
-        const isCurrent = singleLine ? i === displayIdx : i === activeIdx;
-        el.classList.toggle("active", isCurrent);
-        el.classList.toggle("past", singleLine ? i < displayIdx : i < activeIdx);
-
-        if (singleLine) {
-          const near = displayIdx === -1 ? i === 0 : Math.abs(i - displayIdx) <= 1;
-          el.style.visibility = near ? "visible" : "hidden";
-          el.style.pointerEvents = isCurrent ? "auto" : "none";
-          el.style.filter = "none";
-          el.style.transitionDelay = "0s";
-          if (i === displayIdx) {
-            el.style.transform = "translateY(0px) scale(1)";
-            el.style.opacity = "1";
-          } else if (i < displayIdx) {
-            el.style.transform = "translateY(-22px) scale(0.96)";
-            el.style.opacity = "0";
-          } else {
-            el.style.transform = "translateY(22px) scale(0.96)";
-            el.style.opacity = "0";
-          }
-        } else {
-          el.style.visibility = "visible";
-          el.style.pointerEvents = "auto";
-          el.style.opacity = "";
-          if (reduceMotion || activeIdx === -1 || i === activeIdx) {
-            el.style.filter = "none";
-          } else {
-            const dist = Math.abs(i - activeIdx);
-            el.style.filter = `blur(${Math.min(dist * 0.65, 2.2).toFixed(2)}px)`;
-          }
-
-          const cascadeDelay =
-            !reduceMotion && activeIdx !== -1 && i > activeIdx
-              ? Math.min((i - activeIdx) * 0.045, 0.36)
-              : 0;
-          if (i === activeIdx) {
-            el.style.transform = `translateY(${(-targetY).toFixed(1)}px) scale(1.035)`;
-          } else if (i < activeIdx) {
-            el.style.transform = `translateY(${(-targetY - 6).toFixed(1)}px) scale(0.92)`;
-          } else {
-            el.style.transform = `translateY(${(-targetY + 8).toFixed(1)}px) scale(0.94)`;
-          }
-          el.style.transitionDelay = `0s, ${cascadeDelay.toFixed(3)}s, 0s, ${cascadeDelay.toFixed(3)}s`;
-        }
-
-        const entry = displayLines[i];
-        if (entry.isIntroDots) continue;
-
-        const letterSpans = el.querySelectorAll<HTMLSpanElement>(".lyrical-letter");
-        if (i === activeIdx) {
+      if (activeIdx >= 0 && activeIdx < displayLines.length) {
+        const entry = displayLines[activeIdx];
+        if (!entry.isIntroDots) {
+          const letterSpans = letterSpansRef.current[activeIdx] ?? [];
           let exactChar = 0;
           const timings = entry.letterTimings;
           if (timings && timings.length === letterSpans.length) {
@@ -756,8 +821,11 @@ function LyricalViewport({
             }
           } else {
             let crawlDuration = 4.0;
-            if (i + 1 < displayLines.length) {
-              crawlDuration = Math.max(0.1, displayLines[i + 1].timeSeconds - entry.timeSeconds);
+            if (activeIdx + 1 < displayLines.length) {
+              crawlDuration = Math.max(
+                0.1,
+                displayLines[activeIdx + 1].timeSeconds - entry.timeSeconds,
+              );
             }
             const maxCrawl = Math.max(entry.text.length / 3.0, 2.5);
             crawlDuration = Math.min(crawlDuration, maxCrawl);
@@ -808,11 +876,11 @@ function LyricalViewport({
               sp.style.textShadow = `0 0 13px rgba(${accentRgb}, 0.42)`;
 
               if (
-                !reduceMotion &&
-                track.playing &&
+                needSparkRect &&
                 sp.textContent?.trim() &&
                 (!timings || !timings[w] || (lyricPos >= timings[w].start && lyricPos < timings[w].end))
               ) {
+                const vpRect = viewport.getBoundingClientRect();
                 const r = sp.getBoundingClientRect();
                 activeLetterRect = {
                   x: r.left - vpRect.left,
@@ -822,19 +890,6 @@ function LyricalViewport({
                 };
               }
             }
-          }
-        } else {
-          const dimColor =
-            i < activeIdx ? "rgba(255, 255, 255, 0.18)" : "rgba(255, 255, 255, 0.4)";
-          for (let w = 0; w < letterSpans.length; w++) {
-            const sp = letterSpans[w];
-            sp.style.color = dimColor;
-            sp.style.textShadow = "none";
-            sp.style.background = "";
-            sp.style.backgroundClip = "";
-            sp.style.webkitBackgroundClip = "";
-            sp.style.webkitTextFillColor = "";
-            sp.style.transform = "";
           }
         }
       }
@@ -849,12 +904,9 @@ function LyricalViewport({
         const list = particlesRef.current;
 
         if (!reduceMotion && track.playing) {
-          frameCount += 1;
-          const sparkInterval = singleLine ? 6 : 4;
-          const maxSparks = singleLine ? 8 : 18;
           const baseRadius = singleLine ? 0.7 : 0.9;
           const extraRadius = singleLine ? 0.7 : 1.0;
-          if (activeLetterRect && frameCount % sparkInterval === 0 && list.length < maxSparks) {
+          if (activeLetterRect && needSparkRect) {
             list.push({
               x: activeLetterRect.x + Math.random() * Math.max(4, activeLetterRect.w),
               y: activeLetterRect.y + Math.random() * Math.max(4, activeLetterRect.h),
@@ -1075,11 +1127,14 @@ function Player({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") setLyricsMenuOpen(false);
     };
+    const onBlur = () => setLyricsMenuOpen(false);
     window.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("blur", onBlur);
     };
   }, [lyricsMenuOpen]);
 

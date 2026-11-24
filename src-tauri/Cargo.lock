@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "peek"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -2414,6 +2414,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "webview2-com",
  "windows",
  "windows-core",
  "windows-sys 0.61.2",

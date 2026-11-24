@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { AppWindow, Camera, Crop, Monitor, Pipette, ScanText, Video, X } from "lucide-react";
+
+type OverlayMode = "region" | "ocr" | "color" | "record-region";
 
 type OverlayPayload = {
-  mode: "region" | "ocr" | "color" | "record-region";
+  mode: OverlayMode;
   previewDataUrl: string;
   virtualWidth: number;
   virtualHeight: number;
@@ -14,6 +17,7 @@ type Rect = { x: number; y: number; w: number; h: number };
 
 export function CaptureOverlay() {
   const [payload, setPayload] = useState<OverlayPayload | null>(null);
+  const [dragging, setDragging] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sampleCtxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -155,6 +159,7 @@ export function CaptureOverlay() {
     const sub = listen<OverlayPayload>("overlay-ready", ({ payload: p }) => {
       dragStartRef.current = null;
       curPosRef.current = null;
+      setDragging(false);
       setPayload(p);
     });
     const onKey = (e: KeyboardEvent) => {
@@ -204,11 +209,21 @@ export function CaptureOverlay() {
     };
   }, [payload, drawOverlay, scheduleDraw]);
 
+  const switchMode = useCallback((nextMode: OverlayMode) => {
+    dragStartRef.current = null;
+    setDragging(false);
+    setPayload((prev) => (prev ? { ...prev, mode: nextMode } : prev));
+    void invoke("switch_overlay_mode", { mode: nextMode }).catch(() => {});
+  }, []);
+
   if (!payload) {
     return <div style={{ width: "100vw", height: "100vh", background: "#080808" }} />;
   }
 
   const isColor = payload.mode === "color";
+  const isOcr = payload.mode === "ocr";
+  const isRecord = payload.mode === "record-region";
+  const isRegion = payload.mode === "region" || payload.mode === "record-region";
 
   const computeRect = (a: Point, b: Point): Rect => ({
     x: Math.min(a.x, b.x),
@@ -216,6 +231,14 @@ export function CaptureOverlay() {
     w: Math.abs(b.x - a.x),
     h: Math.abs(b.y - a.y),
   });
+
+  const hintText = isColor
+    ? "Click pixel to sample color · Esc to cancel"
+    : isOcr
+      ? "Drag area to copy OCR text · Esc to cancel"
+      : isRecord
+        ? "Drag region to record · or choose Window / Display"
+        : "Drag region to capture · or choose Window / Display";
 
   return (
     <div
@@ -232,6 +255,7 @@ export function CaptureOverlay() {
       onPointerDown={(e) => {
         if (e.button === 2) {
           dragStartRef.current = null;
+          setDragging(false);
           void invoke("cancel_overlay");
           return;
         }
@@ -247,6 +271,7 @@ export function CaptureOverlay() {
         const pt = { x: e.clientX, y: e.clientY };
         dragStartRef.current = pt;
         curPosRef.current = pt;
+        setDragging(true);
         scheduleDraw();
       }}
       onPointerMove={(e) => {
@@ -260,6 +285,7 @@ export function CaptureOverlay() {
         }
         const rect = computeRect(dragStartRef.current, { x: e.clientX, y: e.clientY });
         dragStartRef.current = null;
+        setDragging(false);
         if (rect.w < 4 || rect.h < 4) {
           scheduleDraw();
           return;
@@ -277,11 +303,13 @@ export function CaptureOverlay() {
       }}
       onPointerCancel={() => {
         dragStartRef.current = null;
+        setDragging(false);
         scheduleDraw();
       }}
       onContextMenu={(e) => {
         e.preventDefault();
         dragStartRef.current = null;
+        setDragging(false);
         void invoke("cancel_overlay");
       }}
     >
@@ -347,23 +375,127 @@ export function CaptureOverlay() {
       )}
 
       <div
-        style={{
-          position: "fixed",
-          top: 16,
-          left: "50%",
-          transform: "translateX(-50%)",
-          padding: "5px 12px",
-          borderRadius: 999,
-          background: "#080808",
-          border: "1px solid #282828",
-          color: "#f4f4f4",
-          fontSize: 12,
-          pointerEvents: "none",
-        }}
+        className={"capture-notch-wrap" + (dragging ? " is-dragging" : "")}
+        onPointerDown={(e) => e.stopPropagation()}
+        onPointerUp={(e) => e.stopPropagation()}
       >
-        {isColor
-          ? "Click to copy pixel color · Esc to cancel"
-          : "Drag to select region · Esc to cancel"}
+        <div className="capture-notch-row">
+          <svg
+            className="capture-notch-ear left"
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            aria-hidden="true"
+          >
+            <path d="M 0 0 L 10 0 L 10 10 L 8.2 10 A 8.2 8.2 0 0 0 0 1.8 Z" fill="currentColor" />
+          </svg>
+
+          <div className="capture-notch-bar" role="toolbar" aria-label="Capture controls">
+            <div className="capbar-seg" role="group" aria-label="Capture mode">
+              <button
+                type="button"
+                className={"capbar-seg-btn" + (!isRecord ? " active" : "")}
+                title="Screenshot"
+                aria-label="Screenshot mode"
+                aria-pressed={!isRecord}
+                onClick={() => switchMode("region")}
+              >
+                <Camera size={15} />
+              </button>
+              <button
+                type="button"
+                className={"capbar-seg-btn is-rec" + (isRecord ? " active" : "")}
+                title="Record region"
+                aria-label="Record mode"
+                aria-pressed={isRecord}
+                onClick={() => switchMode("record-region")}
+              >
+                <Video size={15} />
+              </button>
+            </div>
+
+            <span className="capbar-sep" aria-hidden="true" />
+
+            <button
+              type="button"
+              className={"capbar-btn" + (isRegion ? " active" : "")}
+              title={isRecord ? "Record dragged region" : "Capture dragged region"}
+              onClick={() => switchMode(isRecord ? "record-region" : "region")}
+            >
+              <Crop size={14} />
+              <span>Region</span>
+            </button>
+            <button
+              type="button"
+              className="capbar-btn"
+              title={isRecord ? "Record active window" : "Capture active window"}
+              onClick={() =>
+                void invoke("complete_overlay_window", { record: isRecord }).catch(() => {})
+              }
+            >
+              <AppWindow size={14} />
+              <span>Window</span>
+            </button>
+            <button
+              type="button"
+              className="capbar-btn"
+              title={isRecord ? "Record display" : "Capture full display"}
+              onClick={() =>
+                void invoke("complete_overlay_fullscreen", { record: isRecord }).catch(() => {})
+              }
+            >
+              <Monitor size={14} />
+              <span>Display</span>
+            </button>
+
+            <span className="capbar-sep" aria-hidden="true" />
+
+            <button
+              type="button"
+              className={"capbar-btn icon-only" + (isColor ? " active" : "")}
+              title="Color picker"
+              aria-label="Color picker"
+              aria-pressed={isColor}
+              onClick={() => switchMode("color")}
+            >
+              <Pipette size={14} />
+            </button>
+            <button
+              type="button"
+              className={"capbar-btn icon-only" + (isOcr ? " active" : "")}
+              title="Extract OCR text"
+              aria-label="Extract OCR text"
+              aria-pressed={isOcr}
+              onClick={() => switchMode("ocr")}
+            >
+              <ScanText size={14} />
+            </button>
+
+            <span className="capbar-sep" aria-hidden="true" />
+
+            <button
+              type="button"
+              className="capbar-btn icon-only"
+              title="Close (Esc)"
+              aria-label="Close capture overlay"
+              onClick={() => void invoke("cancel_overlay")}
+            >
+              <X size={15} />
+            </button>
+          </div>
+
+          <svg
+            className="capture-notch-ear right"
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            aria-hidden="true"
+          >
+            <path d="M 0 0 L 10 0 L 10 10 L 8.2 10 A 8.2 8.2 0 0 0 0 1.8 Z" fill="currentColor" />
+          </svg>
+        </div>
+
+        <div className="capture-notch-hint">{hintText}</div>
       </div>
     </div>
   );

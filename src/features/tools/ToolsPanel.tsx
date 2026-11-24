@@ -5,11 +5,13 @@ import {
   Bell,
   Bot,
   Camera,
+  Check,
   Clipboard,
   Code2,
   Copy,
   Crop,
   Files,
+  ListChecks,
   Music2,
   PictureInPicture2,
   Pin,
@@ -23,6 +25,7 @@ import {
   StickyNote,
   Timer,
   Trash2,
+  X,
 } from "lucide-react";
 import {
   SolidPauseIcon,
@@ -45,7 +48,15 @@ type ClipboardItem = {
   pinned: boolean;
   copiedAtMs: number;
 };
-type NoteItem = { id: string; title: string; body: string; updatedAtMs: number };
+type ChecklistItem = { id: string; text: string; done: boolean };
+type NoteItem = {
+  id: string;
+  title: string;
+  body: string;
+  kind?: "note" | "checklist";
+  items?: ChecklistItem[];
+  updatedAtMs: number;
+};
 type SnippetItem = { id: string; title: string; content: string };
 type NotesStoreData = { notes: NoteItem[]; snippets: SnippetItem[] };
 type ReminderItem = { id: string; title: string; dueMs: number };
@@ -116,9 +127,66 @@ export function ToolsPanel({
   const [notesData, setNotesData] = useState<NotesStoreData>({ notes: [], snippets: [] });
   const [noteTitle, setNoteTitle] = useState("");
   const [noteBody, setNoteBody] = useState("");
+  const [composerKind, setComposerKind] = useState<"note" | "checklist">("note");
+  const [draftItems, setDraftItems] = useState<ChecklistItem[]>([
+    { id: "d-0", text: "", done: false },
+  ]);
   const [snipTitle, setSnipTitle] = useState("");
   const [snipContent, setSnipContent] = useState("");
   const [noteMode, setNoteMode] = useState<"notes" | "snippets">("notes");
+
+  function saveDraftNote() {
+    if (composerKind === "checklist") {
+      const cleaned = draftItems
+        .map((it) => ({ ...it, text: it.text.trim() }))
+        .filter((it) => it.text.length > 0);
+      if (!noteTitle.trim() && cleaned.length === 0) return;
+      void invoke<NotesStoreData>("save_note", {
+        id: null,
+        title: noteTitle || "Checklist",
+        body: "",
+        kind: "checklist",
+        items: cleaned,
+      }).then((d) => {
+        setNotesData(d);
+        setNoteTitle("");
+        setDraftItems([{ id: `d-${Date.now()}`, text: "", done: false }]);
+      });
+      return;
+    }
+    if (!noteTitle.trim() && !noteBody.trim()) return;
+    void invoke<NotesStoreData>("save_note", {
+      id: null,
+      title: noteTitle,
+      body: noteBody,
+      kind: "note",
+      items: [],
+    }).then((d) => {
+      setNotesData(d);
+      setNoteTitle("");
+      setNoteBody("");
+    });
+  }
+
+  function toggleSavedChecklistItem(note: NoteItem, itemId: string) {
+    const nextItems = (note.items ?? []).map((it) =>
+      it.id === itemId ? { ...it, done: !it.done } : it,
+    );
+    void invoke<NotesStoreData>("save_note", {
+      id: note.id,
+      title: note.title,
+      body: note.body,
+      kind: "checklist",
+      items: nextItems,
+    }).then(setNotesData);
+  }
+
+  function noteCopyText(n: NoteItem): string {
+    if (n.kind === "checklist" && n.items && n.items.length > 0) {
+      return n.items.map((it) => `${it.done ? "[x]" : "[ ]"} ${it.text}`).join("\n");
+    }
+    return n.body || n.title;
+  }
 
   // Launcher state
   const [apps, setApps] = useState<InstalledApp[]>([]);
@@ -702,60 +770,152 @@ export function ToolsPanel({
           {noteMode === "notes" ? (
             <>
               <div className="bento-tile notes-composer-tile">
-                <input
-                  type="text"
-                  className="notes-composer-title"
-                  aria-label="Note title"
-                  placeholder="Title"
-                  value={noteTitle}
-                  onChange={(e) => setNoteTitle(e.target.value)}
-                />
-                <textarea
-                  className="notes-composer-body"
-                  rows={3}
-                  aria-label="Note content"
-                  placeholder="Write a quick note…"
-                  value={noteBody}
-                  onChange={(e) => setNoteBody(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (
-                      (e.ctrlKey || e.metaKey) &&
-                      e.key === "Enter" &&
-                      (noteTitle.trim() || noteBody.trim())
-                    ) {
-                      e.preventDefault();
-                      void invoke<NotesStoreData>("save_note", {
-                        id: null,
-                        title: noteTitle,
-                        body: noteBody,
-                      }).then((d) => {
-                        setNotesData(d);
-                        setNoteTitle("");
-                        setNoteBody("");
-                      });
-                    }
-                  }}
-                />
+                <div className="notes-composer-head">
+                  <input
+                    type="text"
+                    className="notes-composer-title"
+                    aria-label="Note title"
+                    placeholder={composerKind === "checklist" ? "Checklist title" : "Title"}
+                    value={noteTitle}
+                    onChange={(e) => setNoteTitle(e.target.value)}
+                  />
+                  <div className="drag-mode-pill" role="group" aria-label="Note format">
+                    <button
+                      type="button"
+                      className={"drag-mode-opt" + (composerKind === "note" ? " active" : "")}
+                      onClick={() => setComposerKind("note")}
+                    >
+                      Text
+                    </button>
+                    <button
+                      type="button"
+                      className={"drag-mode-opt" + (composerKind === "checklist" ? " active" : "")}
+                      onClick={() => setComposerKind("checklist")}
+                    >
+                      List
+                    </button>
+                  </div>
+                </div>
+
+                {composerKind === "checklist" ? (
+                  <div className="notes-checklist-editor">
+                    {draftItems.map((item, idx) => (
+                      <div key={item.id} className="check-item-row">
+                        <button
+                          type="button"
+                          className={"check-box-btn" + (item.done ? " is-checked" : "")}
+                          aria-label={item.done ? "Mark incomplete" : "Mark complete"}
+                          aria-pressed={item.done}
+                          onClick={() =>
+                            setDraftItems((prev) =>
+                              prev.map((it) =>
+                                it.id === item.id ? { ...it, done: !it.done } : it,
+                              ),
+                            )
+                          }
+                        >
+                          {item.done && <Check size={10} strokeWidth={2.6} />}
+                        </button>
+                        <input
+                          type="text"
+                          className="check-item-input"
+                          placeholder={`Task ${idx + 1}…`}
+                          value={item.text}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setDraftItems((prev) =>
+                              prev.map((it) => (it.id === item.id ? { ...it, text: val } : it)),
+                            );
+                          }}
+                          onKeyDown={(e) => {
+                            if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                              e.preventDefault();
+                              saveDraftNote();
+                            } else if (e.key === "Enter") {
+                              e.preventDefault();
+                              setDraftItems((prev) => [
+                                ...prev.slice(0, idx + 1),
+                                {
+                                  id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                                  text: "",
+                                  done: false,
+                                },
+                                ...prev.slice(idx + 1),
+                              ]);
+                            }
+                          }}
+                        />
+                        {draftItems.length > 1 && (
+                          <button
+                            type="button"
+                            className="check-remove-btn"
+                            aria-label="Remove item"
+                            onClick={() =>
+                              setDraftItems((prev) => prev.filter((it) => it.id !== item.id))
+                            }
+                          >
+                            <X size={11} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      className="check-add-btn"
+                      onClick={() =>
+                        setDraftItems((prev) => [
+                          ...prev,
+                          {
+                            id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                            text: "",
+                            done: false,
+                          },
+                        ])
+                      }
+                    >
+                      <Plus size={11} />
+                      <span>Add task</span>
+                    </button>
+                  </div>
+                ) : (
+                  <textarea
+                    className="notes-composer-body"
+                    rows={3}
+                    aria-label="Note content"
+                    placeholder="Write a quick note…"
+                    value={noteBody}
+                    onChange={(e) => setNoteBody(e.target.value)}
+                    onKeyDown={(e) => {
+                      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                        e.preventDefault();
+                        saveDraftNote();
+                      }
+                    }}
+                  />
+                )}
+
                 <div className="notes-composer-foot">
-                  <span className="notes-hint">Ctrl+Enter to save</span>
+                  <span className="notes-hint">
+                    {composerKind === "checklist"
+                      ? "Enter adds task · Ctrl+Enter saves"
+                      : "Ctrl+Enter to save"}
+                  </span>
                   <button
                     type="button"
                     className="btn primary sm"
-                    disabled={!noteTitle.trim() && !noteBody.trim()}
-                    onClick={() =>
-                      void invoke<NotesStoreData>("save_note", {
-                        id: null,
-                        title: noteTitle,
-                        body: noteBody,
-                      }).then((d) => {
-                        setNotesData(d);
-                        setNoteTitle("");
-                        setNoteBody("");
-                      })
+                    disabled={
+                      composerKind === "checklist"
+                        ? !noteTitle.trim() && !draftItems.some((i) => i.text.trim())
+                        : !noteTitle.trim() && !noteBody.trim()
                     }
+                    onClick={saveDraftNote}
                   >
-                    <StickyNote size={12} />
-                    <span>Save note</span>
+                    {composerKind === "checklist" ? (
+                      <ListChecks size={12} />
+                    ) : (
+                      <StickyNote size={12} />
+                    )}
+                    <span>{composerKind === "checklist" ? "Save list" : "Save note"}</span>
                   </button>
                 </div>
               </div>
@@ -767,56 +927,94 @@ export function ToolsPanel({
                 </div>
               ) : (
                 <div className="notes-cards-grid">
-                  {notesData.notes.map((n) => (
-                    <div key={n.id} className="note-bento-card">
-                      <div className="note-card-head">
-                        <strong title={n.title}>{n.title}</strong>
-                        <span className="note-card-time">{relativeShort(n.updatedAtMs)}</span>
+                  {notesData.notes.map((n) => {
+                    const isChecklist = n.kind === "checklist";
+                    const items = n.items ?? [];
+                    const doneCount = items.filter((i) => i.done).length;
+                    return (
+                      <div key={n.id} className="note-bento-card">
+                        <div className="note-card-head">
+                          <strong title={n.title}>{n.title}</strong>
+                          <span className="note-card-meta-right">
+                            {isChecklist && (
+                              <span className="note-check-count">
+                                {doneCount}/{items.length}
+                              </span>
+                            )}
+                            <span className="note-card-time">{relativeShort(n.updatedAtMs)}</span>
+                          </span>
+                        </div>
+
+                        {isChecklist ? (
+                          <div className="note-card-checklist">
+                            {items.slice(0, 4).map((it) => (
+                              <button
+                                key={it.id}
+                                type="button"
+                                className={"note-card-chk" + (it.done ? " is-done" : "")}
+                                onClick={() => toggleSavedChecklistItem(n, it.id)}
+                              >
+                                <span
+                                  className={"check-box-btn sm" + (it.done ? " is-checked" : "")}
+                                  aria-hidden="true"
+                                >
+                                  {it.done && <Check size={9} strokeWidth={2.7} />}
+                                </span>
+                                <span>{it.text}</span>
+                              </button>
+                            ))}
+                            {items.length > 4 && (
+                              <span className="note-card-more">+{items.length - 4} more</span>
+                            )}
+                          </div>
+                        ) : (
+                          n.body && <p className="note-card-body">{n.body}</p>
+                        )}
+
+                        <div className="note-card-actions">
+                          <button
+                            type="button"
+                            className="shelf-act-btn"
+                            title="Float sticky note"
+                            aria-label="Float note"
+                            onClick={() =>
+                              void invoke("open_floating_note", { id: n.id }).catch((e) =>
+                                setError(String(e)),
+                              )
+                            }
+                          >
+                            <PictureInPicture2 size={11} />
+                          </button>
+                          <button
+                            type="button"
+                            className="shelf-act-btn"
+                            title="Copy note"
+                            aria-label="Copy note"
+                            onClick={() =>
+                              void invoke("copy_tool_text", { text: noteCopyText(n) }).then(() =>
+                                flash("Copied"),
+                              )
+                            }
+                          >
+                            <Copy size={11} />
+                          </button>
+                          <button
+                            type="button"
+                            className="shelf-act-btn"
+                            title="Delete note"
+                            aria-label="Delete note"
+                            onClick={() =>
+                              void invoke<NotesStoreData>("delete_note", { id: n.id }).then(
+                                setNotesData,
+                              )
+                            }
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
                       </div>
-                      {n.body && <p className="note-card-body">{n.body}</p>}
-                      <div className="note-card-actions">
-                        <button
-                          type="button"
-                          className="shelf-act-btn"
-                          title="Float sticky note"
-                          aria-label="Float note"
-                          onClick={() =>
-                            void invoke("open_floating_note", { id: n.id }).catch((e) =>
-                              setError(String(e)),
-                            )
-                          }
-                        >
-                          <PictureInPicture2 size={11} />
-                        </button>
-                        <button
-                          type="button"
-                          className="shelf-act-btn"
-                          title="Copy note"
-                          aria-label="Copy note"
-                          onClick={() =>
-                            void invoke("copy_tool_text", { text: n.body || n.title }).then(() =>
-                              flash("Copied"),
-                            )
-                          }
-                        >
-                          <Copy size={11} />
-                        </button>
-                        <button
-                          type="button"
-                          className="shelf-act-btn"
-                          title="Delete note"
-                          aria-label="Delete note"
-                          onClick={() =>
-                            void invoke<NotesStoreData>("delete_note", { id: n.id }).then(
-                              setNotesData,
-                            )
-                          }
-                        >
-                          <Trash2 size={11} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </>

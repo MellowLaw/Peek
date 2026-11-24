@@ -64,6 +64,16 @@ export type Preferences = {
   pinnedAiProviders: AiProviderId[];
   aiBudgets: ProviderBudgets;
   cameraPanelAdded: boolean;
+  skippedUpdateVersion: string;
+};
+
+export type AutostartStatus = {
+  enabledInPrefs: boolean;
+  registered: boolean;
+  pathMatches: boolean;
+  targetExists: boolean;
+  disabledByWindows: boolean;
+  registeredPath: string;
 };
 
 export type MonitorInfo = {

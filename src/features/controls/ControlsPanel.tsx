@@ -22,6 +22,7 @@ import {
   Zap,
 } from "lucide-react";
 import { AmpKnob } from "../../components/AmpKnob";
+import { SmoothSlider } from "../../components/SmoothSlider";
 
 type AudioDeviceInfo = { id: string; name: string; isDefault: boolean };
 type AppAudioSession = { pid: number; name: string; volume: number; muted: boolean };
@@ -631,22 +632,19 @@ export function ControlsPanel() {
                   </span>
                   {d.supported ? (
                     <>
-                      <input
-                        type="range"
-                        aria-label={"Brightness for " + d.name}
+                      <SmoothSlider
+                        ariaLabel={"Brightness for " + d.name}
                         min={0}
                         max={100}
+                        step={1}
                         value={d.level}
-                        onPointerDown={() => {
+                        onDragStart={() => {
                           draggingBrightnessIdRef.current = d.id;
                         }}
-                        onPointerUp={() => {
+                        onDragEnd={() => {
                           draggingBrightnessIdRef.current = null;
                         }}
-                        onPointerCancel={() => {
-                          draggingBrightnessIdRef.current = null;
-                        }}
-                        onChange={(e) => updateBrightness(d.id, Number(e.target.value))}
+                        onChange={(val) => updateBrightness(d.id, val)}
                       />
                       <span className="ctrl-val">{d.level}%</span>
                     </>
@@ -811,39 +809,43 @@ export function ControlsPanel() {
       {/* App Audio Mixer Bento */}
       {audio && audio.appSessions.length > 0 && (
         <div className="bento-tile bento-mixer">
-          <span className="bento-label">App mixer</span>
-          <div className="app-mixer-list">
+          <div className="bento-tile-head">
+            <span className="bento-label">App mixer</span>
+            <span className="bento-count-pill">{audio.appSessions.length}</span>
+          </div>
+          <div className="app-mixer-grid">
             {audio.appSessions.map((s) => (
-              <div key={s.pid} className="ctrl-slider-row">
-                <button
-                  type="button"
-                  className="bento-mini-btn"
-                  aria-label={"Mute " + s.name}
-                  onClick={() => void toggleAppMute(s.pid, s.muted)}
-                >
-                  {s.muted ? <VolumeX size={11} /> : <Volume2 size={11} />}
-                </button>
-                <span className="ctrl-app-name truncate" title={s.name}>
-                  {s.name}
-                </span>
-                <input
-                  type="range"
-                  aria-label={"Volume for " + s.name}
-                  min={0}
-                  max={100}
+              <div key={s.pid} className="mixer-knob-card">
+                <div className="mixer-knob-head">
+                  <span className="mixer-app-name truncate" title={s.name}>
+                    {s.name}
+                  </span>
+                  <button
+                    type="button"
+                    className={"mixer-mute-btn" + (s.muted ? " active-warn" : "")}
+                    aria-label={s.muted ? `Unmute ${s.name}` : `Mute ${s.name}`}
+                    title={s.muted ? `Unmute ${s.name}` : `Mute ${s.name}`}
+                    onClick={() => void toggleAppMute(s.pid, s.muted)}
+                  >
+                    {s.muted ? <VolumeX size={11} /> : <Volume2 size={11} />}
+                  </button>
+                </div>
+                <AmpKnob
+                  size="sm"
                   value={s.volume}
-                  onPointerDown={() => {
+                  muted={s.muted}
+                  ariaLabel={`${s.name} volume`}
+                  onDragStart={() => {
                     draggingAppPidRef.current = s.pid;
                   }}
-                  onPointerUp={() => {
-                    draggingAppPidRef.current = null;
+                  onDragEnd={() => {
+                    if (draggingAppPidRef.current === s.pid) {
+                      draggingAppPidRef.current = null;
+                    }
                   }}
-                  onPointerCancel={() => {
-                    draggingAppPidRef.current = null;
-                  }}
-                  onChange={(e) => changeAppVolume(s.pid, Number(e.target.value))}
+                  onChange={(val) => changeAppVolume(s.pid, val)}
+                  onToggleMute={() => void toggleAppMute(s.pid, s.muted)}
                 />
-                <span className="ctrl-val">{s.volume}%</span>
               </div>
             ))}
           </div>

@@ -55,12 +55,32 @@ pub struct ClipboardItem {
     pub copied_at_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteKind {
+    #[default]
+    Note,
+    Checklist,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistItem {
+    pub id: String,
+    pub text: String,
+    pub done: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteItem {
     pub id: String,
     pub title: String,
     pub body: String,
+    #[serde(default)]
+    pub kind: NoteKind,
+    #[serde(default)]
+    pub items: Vec<ChecklistItem>,
     pub updated_at_ms: u64,
 }
 
@@ -682,6 +702,8 @@ impl ToolsState {
                 id,
                 title: "Quick Note".to_string(),
                 body: String::new(),
+                kind: NoteKind::Note,
+                items: Vec::new(),
                 updated_at_ms: ts,
             };
             g.notes.insert(0, item.clone());
@@ -803,12 +825,29 @@ pub fn save_note(
     id: Option<String>,
     title: String,
     body: String,
+    kind: Option<NoteKind>,
+    items: Option<Vec<ChecklistItem>>,
 ) -> Result<NotesStoreData, String> {
     let clean_title = if title.trim().is_empty() {
         "Note".to_string()
     } else {
         title.trim().to_string()
     };
+    let clean_items = items.map(|list| {
+        list.into_iter()
+            .filter(|i| !i.text.trim().is_empty())
+            .enumerate()
+            .map(|(idx, i)| ChecklistItem {
+                id: if i.id.trim().is_empty() {
+                    format!("chk-{idx}")
+                } else {
+                    i.id
+                },
+                text: i.text.trim().to_string(),
+                done: i.done,
+            })
+            .collect::<Vec<_>>()
+    });
     let ts = now_ms();
     let data = {
         let mut g = state.notes.lock().unwrap();
@@ -816,6 +855,12 @@ pub fn save_note(
             if let Some(n) = g.notes.iter_mut().find(|n| n.id == existing_id) {
                 n.title = clean_title;
                 n.body = body;
+                if let Some(k) = kind {
+                    n.kind = k;
+                }
+                if let Some(next_items) = clean_items {
+                    n.items = next_items;
+                }
                 n.updated_at_ms = ts;
             }
         } else {
@@ -826,6 +871,8 @@ pub fn save_note(
                     id,
                     title: clean_title,
                     body,
+                    kind: kind.unwrap_or(NoteKind::Note),
+                    items: clean_items.unwrap_or_default(),
                     updated_at_ms: ts,
                 },
             );
@@ -1308,5 +1355,42 @@ mod tests {
         let remaining: Vec<ClipboardItem> = Vec::new();
         cleanup_orphaned_clipboard_images(dir.path(), &remaining);
         assert!(!stored_path.exists());
+    }
+
+    #[test]
+    fn checklist_notes_roundtrip_and_legacy_deserialization() {
+        let legacy = r#"{"notes":[{"id":"n-1","title":"Old","body":"Plain","updatedAtMs":10}],"snippets":[]}"#;
+        let parsed: NotesStoreData = serde_json::from_str(legacy).expect("legacy notes parse");
+        assert_eq!(parsed.notes[0].kind, NoteKind::Note);
+        assert!(parsed.notes[0].items.is_empty());
+
+        let checklist = NotesStoreData {
+            notes: vec![NoteItem {
+                id: "n-2".into(),
+                title: "Today".into(),
+                body: String::new(),
+                kind: NoteKind::Checklist,
+                items: vec![
+                    ChecklistItem {
+                        id: "c-1".into(),
+                        text: "Check autostart".into(),
+                        done: true,
+                    },
+                    ChecklistItem {
+                        id: "c-2".into(),
+                        text: "Test v0.3.0".into(),
+                        done: false,
+                    },
+                ],
+                updated_at_ms: 20,
+            }],
+            snippets: vec![],
+        };
+        let encoded = serde_json::to_string(&checklist).unwrap();
+        let round: NotesStoreData = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(round.notes[0].kind, NoteKind::Checklist);
+        assert_eq!(round.notes[0].items.len(), 2);
+        assert!(round.notes[0].items[0].done);
+        assert!(!round.notes[0].items[1].done);
     }
 }

@@ -6,8 +6,17 @@ import {
   CameraOff,
   FlipHorizontal2,
   Maximize2,
+  Sparkles,
   X,
 } from "lucide-react";
+import { EnhancedCameraStage } from "../camera/EnhancedCameraStage";
+import {
+  captureEnhancedSnapshot,
+  nextEnhanceMode,
+  normalizeEnhanceMode,
+  openBestCameraStream,
+  type CameraEnhanceMode,
+} from "../camera/cameraEnhance";
 
 const SIZE_PRESETS = [
   { label: "S", width: 280, height: 184 },
@@ -15,14 +24,19 @@ const SIZE_PRESETS = [
   { label: "L", width: 480, height: 314 },
 ];
 
-function parseHashParams(): { deviceId: string; mirrored: boolean } {
+function parseHashParams(): {
+  deviceId: string;
+  mirrored: boolean;
+  enhance: CameraEnhanceMode;
+} {
   const hash = window.location.hash;
   const qIdx = hash.indexOf("?");
-  if (qIdx === -1) return { deviceId: "", mirrored: true };
+  if (qIdx === -1) return { deviceId: "", mirrored: true, enhance: "off" };
   const params = new URLSearchParams(hash.slice(qIdx + 1));
   return {
     deviceId: params.get("device") ?? "",
     mirrored: params.get("mirrored") !== "0",
+    enhance: normalizeEnhanceMode(params.get("enhance")),
   };
 }
 
@@ -30,6 +44,7 @@ export function FloatingCamera() {
   const initial = parseHashParams();
   const [cameraOn, setCameraOn] = useState(false);
   const [mirrored, setMirrored] = useState(initial.mirrored);
+  const [enhanceMode, setEnhanceMode] = useState<CameraEnhanceMode>(initial.enhance);
   const [sizeIdx, setSizeIdx] = useState(1);
   const [streamVersion, setStreamVersion] = useState(0);
   const [notice, setNotice] = useState("");
@@ -62,10 +77,7 @@ export function FloatingCamera() {
       return;
     }
     try {
-      const constraint: MediaTrackConstraints = initial.deviceId
-        ? { deviceId: { exact: initial.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-        : { width: { ideal: 1280 }, height: { ideal: 720 } };
-      const stream = await navigator.mediaDevices.getUserMedia({ video: constraint, audio: false });
+      const stream = await openBestCameraStream(initial.deviceId || undefined);
       streamRef.current = stream;
       setStreamVersion((v) => v + 1);
       setCameraOn(true);
@@ -109,18 +121,9 @@ export function FloatingCamera() {
 
   async function takeSnap() {
     const video = videoRef.current;
-    if (!video || !cameraOn || video.videoWidth === 0 || video.videoHeight === 0) return;
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    if (mirrored) {
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-    }
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL("image/png");
+    if (!video || !cameraOn) return;
+    const dataUrl = captureEnhancedSnapshot(video, mirrored, enhanceMode);
+    if (!dataUrl) return;
     try {
       await invoke("save_camera_snapshot", { dataUrl });
       setNotice("Saved");
@@ -137,19 +140,25 @@ export function FloatingCamera() {
 
   function handleDragMouseDown(e: React.MouseEvent) {
     if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest("button, select, input")) return;
+    if ((e.target as HTMLElement).closest("button, select, input, .float-resize-handle")) return;
     void invoke("start_floating_drag");
+  }
+
+  function startResize(corner: "se" | "sw" | "nw", e: React.MouseEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void invoke("start_floating_resize", { corner }).catch(() => {});
   }
 
   return (
     <div className="float-win float-cam" onMouseDown={handleDragMouseDown}>
       {cameraOn ? (
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className={"camera-video is-live" + (mirrored ? " is-mirrored" : "")}
+        <EnhancedCameraStage
+          videoRef={videoRef}
+          streamVersion={streamVersion}
+          mirrored={mirrored}
+          enhanceMode={enhanceMode}
         />
       ) : (
         <div className="camera-off-overlay">
@@ -193,6 +202,16 @@ export function FloatingCamera() {
         >
           <FlipHorizontal2 size={12} />
         </button>
+        <button
+          type="button"
+          className={"float-bar-btn" + (enhanceMode !== "off" ? " active" : "")}
+          title="Cycle enhance (Off / Natural / Studio)"
+          aria-label="Cycle camera enhance mode"
+          onClick={() => setEnhanceMode((m) => nextEnhanceMode(m))}
+        >
+          <Sparkles size={12} />
+          {enhanceMode !== "off" && <span>{enhanceMode === "natural" ? "Nat" : "Stu"}</span>}
+        </button>
         {cameraOn && (
           <button
             type="button"
@@ -214,6 +233,34 @@ export function FloatingCamera() {
           <Maximize2 size={11} />
           <span>{SIZE_PRESETS[sizeIdx].label}</span>
         </button>
+      </div>
+
+      <div
+        className="float-resize-handle is-nw"
+        aria-hidden="true"
+        onMouseDown={(e) => startResize("nw", e)}
+      />
+      <div
+        className="float-resize-handle is-sw"
+        aria-hidden="true"
+        onMouseDown={(e) => startResize("sw", e)}
+      />
+      <div
+        className="float-resize-handle is-se"
+        role="separator"
+        aria-label="Drag corner to resize floating camera"
+        title="Drag corner to resize"
+        onMouseDown={(e) => startResize("se", e)}
+      >
+        <svg className="float-resize-grip" viewBox="0 0 14 14" width="14" height="14" aria-hidden="true">
+          <path
+            d="M 11.5 5 A 6.5 6.5 0 0 1 5 11.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+          />
+        </svg>
       </div>
     </div>
   );

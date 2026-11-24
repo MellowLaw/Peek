@@ -4,7 +4,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[derive(Clone, Debug, Serialize)]
@@ -13,6 +13,7 @@ pub struct UpdateInfo {
     pub version: String,
     pub current_version: String,
     pub notes: String,
+    pub full_notes: String,
     pub pub_date: Option<String>,
 }
 
@@ -113,6 +114,19 @@ pub fn summarize_release_notes(body: Option<&str>) -> String {
     }
 }
 
+pub fn format_release_notes_full(body: Option<&str>) -> String {
+    let Some(raw) = body else {
+        return String::new();
+    };
+    let normalized = raw.replace("\r\n", "\n").trim().to_string();
+    if normalized.chars().count() > 4000 {
+        let prefix: String = normalized.chars().take(3997).collect();
+        format!("{prefix}...")
+    } else {
+        normalized
+    }
+}
+
 async fn run_check(
     app: &AppHandle,
     state: &UpdaterState,
@@ -131,12 +145,19 @@ async fn run_check(
     let checker = app.updater().map_err(|e| e.to_string())?;
     match checker.check().await {
         Ok(Some(update)) => {
+            let version = update.version.clone();
             let info = UpdateInfo {
-                version: update.version.clone(),
+                version: version.clone(),
                 current_version: update.current_version.clone(),
                 notes: summarize_release_notes(update.body.as_deref()),
+                full_notes: format_release_notes_full(update.body.as_deref()),
                 pub_date: update.date.map(|d| d.to_string()),
             };
+            let skipped = app
+                .try_state::<crate::preferences::PreferencesState>()
+                .map(|s| s.0.lock().unwrap().skipped_update_version.clone())
+                .unwrap_or_default();
+            let is_skipped = !skipped.is_empty() && skipped == version;
             *state.pending.lock().await = Some(update);
             {
                 let mut guard = state.snapshot.lock().unwrap();
@@ -146,9 +167,13 @@ async fn run_check(
                 guard.downloaded_bytes = 0;
                 guard.total_bytes = None;
                 guard.error = None;
-                guard.dismissed = false;
+                guard.dismissed = !manual && is_skipped;
             }
-            Ok(state.emit_state(app))
+            let emitted = state.emit_state(app);
+            if (manual || !is_skipped) && std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
+                let _ = crate::floating::open_floating_update_window(app);
+            }
+            Ok(emitted)
         }
         Ok(None) => {
             *state.pending.lock().await = None;
@@ -307,7 +332,46 @@ pub fn dismiss_update_prompt(
         let mut guard = state.snapshot.lock().unwrap();
         guard.dismissed = true;
     }
+    if let Some(win) = app.get_webview_window("float-update") {
+        let _ = win.close();
+    }
     state.emit_state(&app)
+}
+
+#[tauri::command]
+pub async fn skip_available_update(
+    app: AppHandle,
+    state: State<'_, Arc<UpdaterState>>,
+) -> Result<UpdateStateSnapshot, String> {
+    let version = state
+        .snapshot
+        .lock()
+        .unwrap()
+        .available
+        .as_ref()
+        .map(|a| a.version.clone())
+        .unwrap_or_default();
+
+    if !version.is_empty() {
+        let next = {
+            let prefs_state = app.state::<crate::preferences::PreferencesState>();
+            let mut g = prefs_state.0.lock().unwrap();
+            g.skipped_update_version = version;
+            g.clone()
+        };
+        if let Ok(dir) = app.path().app_config_dir() {
+            crate::preferences::write_json_atomic(&dir, "preferences.json", &next)?;
+        }
+    }
+
+    {
+        let mut guard = state.snapshot.lock().unwrap();
+        guard.dismissed = true;
+    }
+    if let Some(win) = app.get_webview_window("float-update") {
+        let _ = win.close();
+    }
+    Ok(state.emit_state(&app))
 }
 
 #[cfg(test)]
@@ -335,6 +399,10 @@ mod tests {
         assert_eq!(
             summarize_release_notes(Some("## Peek v0.2.0\n\n- Improved cards\n- Bug fixes")),
             "Peek v0.2.0 — - Improved cards"
+        );
+        assert_eq!(
+            format_release_notes_full(Some("## Peek v0.3.0\r\n- Fix 1\r\n- Fix 2")),
+            "## Peek v0.3.0\n- Fix 1\n- Fix 2"
         );
         assert_eq!(summarize_release_notes(None), "");
     }

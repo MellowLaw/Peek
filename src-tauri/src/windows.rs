@@ -116,6 +116,62 @@ pub fn apply_rounded_window_region(
     Ok(())
 }
 
+/// Read a window's physical bounding rectangle `(left, top, right, bottom)`.
+pub fn window_rect(window: &WebviewWindow) -> Result<(i32, i32, i32, i32), String> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let handle = window.hwnd().map_err(|e| e.to_string())?;
+    let mut rc = RECT::default();
+    unsafe {
+        GetWindowRect(HWND(handle.0), &mut rc).map_err(|e| e.to_string())?;
+    }
+    Ok((rc.left, rc.top, rc.right, rc.bottom))
+}
+
+/// Atomically move and resize a frameless floating window in physical coordinates and refresh
+/// its `SetWindowRgn` rounded mask without adding `WS_THICKFRAME` border chrome.
+pub fn set_rounded_window_rect(
+    window: &WebviewWindow,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    scale: f64,
+    radius_logical: f64,
+) -> Result<(), String> {
+    let handle = window.hwnd().map_err(|e| e.to_string())?;
+    let w = width.max(2);
+    let h = height.max(2);
+    let dia = ((radius_logical * 2.0 * scale).round() as i32)
+        .min(w)
+        .min(h)
+        .max(2);
+    unsafe {
+        if SetWindowPos(
+            handle.0,
+            std::ptr::null_mut(),
+            x,
+            y,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, dia, dia);
+        if rgn.is_null() {
+            return Err("Could not create rounded floating window region".into());
+        }
+        if SetWindowRgn(handle.0, rgn, 1) == 0 {
+            DeleteObject(rgn);
+            return Err("SetWindowRgn failed for floating window".into());
+        }
+    }
+    Ok(())
+}
+
 /// Begin native Win32 caption-less window dragging via `WM_NCLBUTTONDOWN` + `HTCAPTION`.
 pub fn begin_window_drag(window: &WebviewWindow) -> Result<(), String> {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -148,8 +204,9 @@ pub fn enforce_frameless_popup(window: &WebviewWindow, focusable: bool) -> Resul
     };
     use windows::Win32::Graphics::Gdi::HRGN;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, GWL_STYLE, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
-        WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_STATICEDGE,
+        GetClassLongPtrW, GetWindowLongW, SetClassLongPtrW, SetWindowLongW, GCLP_HBRBACKGROUND,
+        GWL_EXSTYLE, GWL_STYLE, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_APPWINDOW,
+        WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_STATICEDGE,
         WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
         WS_THICKFRAME,
     };
@@ -158,6 +215,9 @@ pub fn enforce_frameless_popup(window: &WebviewWindow, focusable: bool) -> Resul
     let win_hwnd = HWND(handle.0);
 
     unsafe {
+        if GetClassLongPtrW(win_hwnd, GCLP_HBRBACKGROUND) != 0 {
+            SetClassLongPtrW(win_hwnd, GCLP_HBRBACKGROUND, 0);
+        }
         let cur_style = GetWindowLongW(win_hwnd, GWL_STYLE) as u32;
         let strip_style = (WS_CAPTION
             | WS_THICKFRAME
@@ -496,6 +556,208 @@ pub fn snap_window(hwnd: isize, layout: SnapLayout) -> Result<(), String> {
         };
         SetWindowPos(h, None, x, y, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE)
             .map_err(|e| e.to_string())
+    }
+}
+
+/// Force WebView2's controller and Tauri window surface to true transparent `(0,0,0,0)` so
+/// dynamic `SetWindowRgn` expansion never exposes an unpainted white backdrop.
+pub fn set_webview_transparent_bg(window: &WebviewWindow) {
+    let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+    let _ = window.with_webview(|wv| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
+        };
+        use windows_core::Interface;
+        if let Ok(ctrl2) = wv.controller().cast::<ICoreWebView2Controller2>() {
+            let _ = ctrl2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                A: 0,
+                R: 0,
+                G: 0,
+                B: 0,
+            });
+        }
+    });
+}
+
+/// Hint Edge WebView2 to release V8/Blink caches whenever Peek collapses into idle or hidden state.
+pub fn set_webview_memory_low(window: &WebviewWindow, low: bool) {
+    let _ = window.with_webview(move |wv| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+        };
+        use windows_core::Interface;
+        if let Ok(core) = wv.controller().CoreWebView2() {
+            if let Ok(wv19) = core.cast::<ICoreWebView2_19>() {
+                let level = if low {
+                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+                } else {
+                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+                };
+                let _ = wv19.SetMemoryUsageTargetLevel(level);
+            }
+        }
+    });
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutostartStatus {
+    pub enabled_in_prefs: bool,
+    pub registered: bool,
+    pub path_matches: bool,
+    pub target_exists: bool,
+    pub disabled_by_windows: bool,
+    pub registered_path: String,
+}
+
+pub(crate) fn parse_run_exe_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        if let Some(end) = rest.find('"') {
+            return rest[..end].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+pub(crate) fn startup_approved_disabled(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes[0] != 2 && (bytes[0] == 3 || (bytes[0] & 1) == 1)
+}
+
+fn read_registry_string(
+    subkey: windows::core::PCWSTR,
+    value_name: windows::core::PCWSTR,
+) -> Option<String> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        REG_VALUE_TYPE,
+    };
+
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, None, KEY_READ, &mut key) != ERROR_SUCCESS {
+            return None;
+        }
+        let mut typ = REG_VALUE_TYPE::default();
+        let mut size = 0u32;
+        let query = RegQueryValueExW(key, value_name, None, Some(&mut typ), None, Some(&mut size));
+        let result = if query == ERROR_SUCCESS && size >= 2 {
+            let mut buf = vec![0u16; (size as usize).div_ceil(2)];
+            let mut actual = size;
+            if RegQueryValueExW(
+                key,
+                value_name,
+                None,
+                Some(&mut typ),
+                Some(buf.as_mut_ptr() as *mut u8),
+                Some(&mut actual),
+            ) == ERROR_SUCCESS
+            {
+                let len = (actual as usize / 2).min(buf.len());
+                let trimmed = buf[..len]
+                    .iter()
+                    .take_while(|&&ch| ch != 0)
+                    .copied()
+                    .collect::<Vec<u16>>();
+                Some(String::from_utf16_lossy(&trimmed))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let _ = RegCloseKey(key);
+        result
+    }
+}
+
+fn read_registry_bytes(
+    subkey: windows::core::PCWSTR,
+    value_name: windows::core::PCWSTR,
+) -> Option<Vec<u8>> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        REG_VALUE_TYPE,
+    };
+
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, None, KEY_READ, &mut key) != ERROR_SUCCESS {
+            return None;
+        }
+        let mut typ = REG_VALUE_TYPE::default();
+        let mut size = 0u32;
+        let query = RegQueryValueExW(key, value_name, None, Some(&mut typ), None, Some(&mut size));
+        let result = if query == ERROR_SUCCESS && size > 0 {
+            let mut buf = vec![0u8; size as usize];
+            let mut actual = size;
+            if RegQueryValueExW(
+                key,
+                value_name,
+                None,
+                Some(&mut typ),
+                Some(buf.as_mut_ptr()),
+                Some(&mut actual),
+            ) == ERROR_SUCCESS
+            {
+                buf.truncate(actual as usize);
+                Some(buf)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let _ = RegCloseKey(key);
+        result
+    }
+}
+
+/// Inspect the HKCU Run + StartupApproved status for Peek relative to the running executable.
+pub fn inspect_autostart(enabled_in_prefs: bool) -> AutostartStatus {
+    use windows::core::w;
+
+    let raw = read_registry_string(
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Run"),
+        w!("Peek"),
+    );
+    let registered_path = raw.as_deref().map(parse_run_exe_path).unwrap_or_default();
+    let registered = !registered_path.is_empty();
+    let current = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let path_matches =
+        registered && !current.is_empty() && registered_path.eq_ignore_ascii_case(&current);
+    let target_exists = registered && Path::new(&registered_path).is_file();
+    let disabled_by_windows = registered
+        && read_registry_bytes(
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"),
+            w!("Peek"),
+        )
+        .map(|bytes| startup_approved_disabled(&bytes))
+        .unwrap_or(false);
+
+    AutostartStatus {
+        enabled_in_prefs,
+        registered,
+        path_matches,
+        target_exists,
+        disabled_by_windows,
+        registered_path,
+    }
+}
+
+/// Self-heal HKCU Run\Peek on launch when startup is enabled and not running under an isolated profile.
+pub fn sync_autostart_if_needed(enabled_in_prefs: bool) {
+    if !enabled_in_prefs || std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_some() {
+        return;
+    }
+    let st = inspect_autostart(true);
+    if !st.registered || !st.path_matches || !st.target_exists {
+        let _ = set_autostart(true);
     }
 }
 
@@ -1377,5 +1639,18 @@ mod tests {
             "v2.10|Action=Block|Active=TRUE|Dir=In|Protocol=6|App=C:\\Other\\app.exe|",
             exe,
         ));
+    }
+
+    #[test]
+    fn parses_startup_approved_disabled_flag_and_run_quotes() {
+        assert!(!startup_approved_disabled(&[2, 0, 0, 0]));
+        assert!(startup_approved_disabled(&[3, 0, 0, 0]));
+        assert!(startup_approved_disabled(&[1, 0, 0, 0]));
+        assert!(!startup_approved_disabled(&[]));
+        assert_eq!(
+            parse_run_exe_path(r#""C:\Users\Test\AppData\Local\Peek\peek.exe" --bg"#),
+            r"C:\Users\Test\AppData\Local\Peek\peek.exe"
+        );
+        assert_eq!(parse_run_exe_path(r"C:\Peek\peek.exe"), r"C:\Peek\peek.exe");
     }
 }

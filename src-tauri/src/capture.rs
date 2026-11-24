@@ -628,6 +628,7 @@ pub async fn begin_screen_overlay(
             WebviewUrl::App("index.html#capture-overlay".into()),
         )
         .title("Peek Capture")
+        .additional_browser_args(crate::PEEK_BROWSER_ARGS)
         .decorations(false)
         .transparent(false)
         .always_on_top(true)
@@ -668,6 +669,131 @@ fn close_overlay_restore_main(app: &AppHandle) {
     if let Some(m) = app.get_webview_window("main") {
         let _ = crate::island::show_island_window(&m);
     }
+}
+
+fn crop_virtual_rect(
+    session: &OverlaySession,
+    rx: i32,
+    ry: i32,
+    rw: i32,
+    rh: i32,
+) -> Result<(u32, u32, u32, u32), String> {
+    if session.vw == 0 || session.vh == 0 || rw <= 0 || rh <= 0 {
+        return Err("Capture target bounds empty".into());
+    }
+    let left = (rx - session.vx).clamp(0, session.vw.saturating_sub(1) as i32);
+    let top = (ry - session.vy).clamp(0, session.vh.saturating_sub(1) as i32);
+    let right = (rx + rw - session.vx).clamp(left + 1, session.vw as i32);
+    let bottom = (ry + rh - session.vy).clamp(top + 1, session.vh as i32);
+    Ok((
+        left as u32,
+        top as u32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    ))
+}
+
+#[tauri::command]
+pub fn switch_overlay_mode(app: AppHandle, mode: String) -> Result<String, String> {
+    let valid = matches!(mode.as_str(), "region" | "ocr" | "color" | "record-region");
+    if !valid {
+        return Err("Unsupported capture overlay mode".into());
+    }
+    let state = app.state::<CaptureState>();
+    let mut g = state.overlay.lock().unwrap();
+    let session = g
+        .as_mut()
+        .ok_or_else(|| "No active capture overlay".to_string())?;
+    session.mode = mode.clone();
+    Ok(mode)
+}
+
+#[tauri::command]
+pub async fn complete_overlay_fullscreen(
+    app: AppHandle,
+    record: bool,
+) -> Result<Option<CaptureResult>, String> {
+    let session = app
+        .state::<CaptureState>()
+        .overlay
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| "No active capture overlay".to_string())?;
+    close_overlay_restore_main(&app);
+
+    let preferred_monitor = app
+        .state::<crate::preferences::PreferencesState>()
+        .0
+        .lock()
+        .unwrap()
+        .monitor_name
+        .clone();
+    let (mx, my, mw, mh) = resolve_monitor_rect(&app, &preferred_monitor)?;
+
+    if record {
+        let even_w = ((mw as u32) & !1).max(16);
+        let even_h = ((mh as u32) & !1).max(16);
+        start_recording_rect(
+            &app,
+            "display",
+            mx,
+            my,
+            even_w,
+            even_h,
+            session.include_mic,
+            session.mic_device,
+            session.add_to_shelf,
+        )?;
+        return Ok(None);
+    }
+
+    let (px, py, pw, ph) = crop_virtual_rect(&session, mx, my, mw, mh)?;
+    let cropped = image::imageops::crop_imm(&session.image, px, py, pw, ph).to_image();
+    let res = finalize_screenshot(&app, &cropped, session.add_to_shelf)?;
+    Ok(Some(res))
+}
+
+#[tauri::command]
+pub async fn complete_overlay_window(
+    app: AppHandle,
+    record: bool,
+) -> Result<Option<CaptureResult>, String> {
+    let session = app
+        .state::<CaptureState>()
+        .overlay
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| "No active capture overlay".to_string())?;
+    close_overlay_restore_main(&app);
+
+    #[cfg(windows)]
+    let (wx, wy, ww, wh) = resolve_active_window_rect(&app)?;
+    #[cfg(not(windows))]
+    let (wx, wy, ww, wh) = (0, 0, 0, 0);
+
+    if record {
+        let even_w = ((ww as u32) & !1).max(16);
+        let even_h = ((wh as u32) & !1).max(16);
+        start_recording_rect(
+            &app,
+            "window",
+            wx,
+            wy,
+            even_w,
+            even_h,
+            session.include_mic,
+            session.mic_device,
+            session.add_to_shelf,
+        )?;
+        return Ok(None);
+    }
+
+    let (px, py, pw, ph) = crop_virtual_rect(&session, wx, wy, ww, wh)?;
+    let cropped = image::imageops::crop_imm(&session.image, px, py, pw, ph).to_image();
+    let res = finalize_screenshot(&app, &cropped, session.add_to_shelf)?;
+    Ok(Some(res))
 }
 
 #[tauri::command]
@@ -858,6 +984,16 @@ pub fn reveal_capture_file(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn open_recordings_folder() -> Result<(), String> {
     let dir = videos_dir()?;
+    Command::new("explorer.exe")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_captures_folder() -> Result<(), String> {
+    let dir = pictures_dir()?;
     Command::new("explorer.exe")
         .arg(&dir)
         .spawn()

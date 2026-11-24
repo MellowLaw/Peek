@@ -1,0 +1,55 @@
+PEEK FOR WINDOWS - TERMS OF USE, LICENSE & PRIVACY NOTICE
+Copyright (c) 2026 Lawrence (MellowLaw)
+
+PLEASE READ THESE TERMS BEFORE INSTALLING OR USING PEEK.
+BY CLICKING "I AGREE" OR INSTALLING PEEK, YOU ACCEPT THESE TERMS.
+
+1. SOFTWARE LICENSE (MIT-STYLE)
+Peek is desktop utility software provided free of charge for personal and
+commercial use. Subject to these terms, you may install, use, copy, and
+distribute unmodified installers on your Windows devices.
+
+2. DISCLAIMER OF WARRANTY & LIMITATION OF LIABILITY
+PEEK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, OR NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY CLAIM, DAMAGES, FILE LOSS, SYSTEM CHANGES, OR OTHER LIABILITY ARISING
+FROM USING THIS SOFTWARE.
+
+3. LOCAL-ONLY PRIVACY & ZERO TELEMETRY
+- Peek does not require an account and sends zero telemetry, analytics,
+  crash reports, or usage tracking to external servers.
+- Notes, snippets, clipboard history, notification history, shelf links,
+  and preferences remain strictly on your device inside:
+    %APPDATA%\com.mellowlaw.peek
+- Peek does not delete or modify your original files when removing items
+  from the File Shelf.
+
+4. OPT-IN FEATURES & WINDOWS PERMISSIONS
+Sensitive capabilities stay disabled or dormant until you turn them on or
+explicitly trigger them:
+- Camera (Cam tab): Webcam access turns on only when toggled on by you.
+  Snapshots save locally to Pictures\Peek.
+- Screen Capture & Recording: Captures occur only on your action. Screen
+  recording uses your locally installed FFmpeg binary when present.
+- Clipboard & Notification History: Disabled by default; stored locally
+  only when enabled in Settings.
+- Phone <-> Desktop QR Transfer: Runs an ephemeral token-protected HTTP
+  server strictly on your local Wi-Fi/LAN for the active transfer session.
+  Allowing Peek through Windows Defender Firewall prompts UAC once.
+- Local Event API: Optional 127.0.0.1 loopback-only server secured with
+  a per-device Bearer token.
+- AI Usage Monitor: Reads local provider quota logs read-only; Peek
+  never reads prompts, secrets, or source repositories.
+
+5. NETWORK CONNECTIONS & UPDATES
+Peek connects to external servers only when:
+- Checking for signed Peek updates via GitHub Releases (startup/manual);
+- Fetching synced lyrics from a user-configured local Lyrical instance
+  or album metadata fallback when music playback is active.
+
+6. WINDOWS SMARTSCREEN & UNINSTALL
+Open-source releases may trigger Windows Defender SmartScreen on first
+launch because they are not signed by a commercial Authenticode CA. You
+may uninstall Peek anytime via Windows Settings -> Installed apps; remove
+%APPDATA%\com.mellowlaw.peek to clear saved local app data.
