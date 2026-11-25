@@ -150,7 +150,7 @@ export function FloatingUpdate() {
       <footer className="float-upd-footer">
         <button
           type="button"
-          className="btn primary sm"
+          className="btn primary sm float-upd-primary"
           disabled={busy || !info}
           onClick={() => void updater.install()}
         >

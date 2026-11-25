@@ -23,7 +23,7 @@ export type UpdateStateSnapshot = {
 
 const EMPTY_UPDATE: UpdateStateSnapshot = {
   status: "idle",
-  currentVersion: "0.3.1",
+  currentVersion: "0.3.2",
   available: null,
   progressPercent: null,
   downloadedBytes: 0,

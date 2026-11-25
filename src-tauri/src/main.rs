@@ -120,6 +120,12 @@ fn quit_app(app: AppHandle) {
 }
 
 fn main() {
+    #[cfg(windows)]
+    let _single_instance = match windows::acquire_single_instance_guard() {
+        Some(guard) => guard,
+        None => return,
+    };
+
     tauri::Builder::default()
         .manage(island::Transition::default())
         .manage(island::CurrentMode::default())

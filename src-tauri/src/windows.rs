@@ -761,6 +761,48 @@ pub fn sync_autostart_if_needed(enabled_in_prefs: bool) {
     }
 }
 
+/// Guard holding Peek's named single-instance Windows mutex for the process lifetime.
+pub struct SingleInstanceGuard(isize);
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(
+                    windows::Win32::Foundation::HANDLE(self.0 as _),
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn try_acquire_named_mutex(name: &str) -> Option<SingleInstanceGuard> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let wide = HSTRING::from(name);
+    unsafe {
+        let Ok(handle) = CreateMutexW(None, false, PCWSTR(wide.as_ptr())) else {
+            return Some(SingleInstanceGuard(0));
+        };
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = CloseHandle(handle);
+            return None;
+        }
+        Some(SingleInstanceGuard(handle.0 as isize))
+    }
+}
+
+/// Acquire Peek's per-user single-instance mutex so duplicate launches exit cleanly instead
+/// of rendering overlapping notches (bypassed when `WEBVIEW2_USER_DATA_FOLDER` is overridden).
+pub fn acquire_single_instance_guard() -> Option<SingleInstanceGuard> {
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_some() {
+        return Some(SingleInstanceGuard(0));
+    }
+    try_acquire_named_mutex(r"Local\com.mellowlaw.peek.single_instance")
+}
+
 /// Configure Windows startup entry in HKCU Run without admin rights.
 pub fn set_autostart(enabled: bool) -> Result<(), String> {
     use windows::core::w;
@@ -1652,5 +1694,19 @@ mod tests {
             r"C:\Users\Test\AppData\Local\Peek\peek.exe"
         );
         assert_eq!(parse_run_exe_path(r"C:\Peek\peek.exe"), r"C:\Peek\peek.exe");
+    }
+
+    #[test]
+    fn named_mutex_blocks_duplicate_instance_until_dropped() {
+        let name = format!(
+            "Local\\com.mellowlaw.peek.test_mutex_{}",
+            std::process::id()
+        );
+        let first = try_acquire_named_mutex(&name);
+        assert!(first.is_some());
+        assert!(try_acquire_named_mutex(&name).is_none());
+        drop(first);
+        let third = try_acquire_named_mutex(&name);
+        assert!(third.is_some());
     }
 }

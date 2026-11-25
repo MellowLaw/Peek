@@ -3608,6 +3608,16 @@ button:disabled, input:disabled, select:disabled {
 }
 .float-upd-footer .btn {
   min-width: 78px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f4f4f4;
+}
+.float-upd-footer .btn.float-upd-primary {
+  background: #f4f4f4;
+  color: #080808;
+  font-weight: 650;
+}
+.float-upd-footer .btn.float-upd-primary:hover:not(:disabled) {
+  background: #ffffff;
 }
 
 /* Bento Settings Redesign */
