@@ -289,6 +289,7 @@ export function App() {
   const [error, setError] = useState("");
   const [panel, setPanel] = useState<PanelId>("music");
   const [visible, setVisible] = useState(true);
+  const [fullscreenActive, setFullscreenActive] = useState(false);
   const [fileDragOver, setFileDragOver] = useState(false);
   const [draggedFiles, setDraggedFiles] = useState<string[]>([]);
   const clockTime = useClock(visible && mode !== "hidden");
@@ -483,9 +484,10 @@ export function App() {
     void changeMode("expanded", { focus: false, panelOverride: target });
   }, [changeMode]);
 
+  const suppressNotchForFullscreen = preferences.hideInFullscreen && fullscreenActive;
   const watchMediaActive =
     visible &&
-    ((preferences.lyricsEnabled && preferences.idleLyricsEnabled) ||
+    ((!suppressNotchForFullscreen && preferences.lyricsEnabled && preferences.idleLyricsEnabled) ||
       mode === "preview" ||
       (mode === "expanded" && panel === "music"));
   const media = useMedia(watchMediaActive);
@@ -494,12 +496,14 @@ export function App() {
     visible &&
     preferences.lyricsEnabled &&
     ((mode === "expanded" && panel === "music") ||
-      (mediaPlaying && preferences.idleLyricsEnabled) ||
+      (!suppressNotchForFullscreen && mediaPlaying && preferences.idleLyricsEnabled) ||
       mode === "lyrics");
   const lyrical = useLyrical(media, lyricsActive, preferences.lyricsEnabled);
 
   const watchAiActive =
-    visible && (preferences.pinnedAiProviders.length > 0 || (mode === "expanded" && panel === "ai"));
+    visible &&
+    ((!suppressNotchForFullscreen && preferences.pinnedAiProviders.length > 0) ||
+      (mode === "expanded" && panel === "ai"));
   const aiUsage = useAiUsage(watchAiActive);
   const pinnedAiItems = useMemo(
     () =>
@@ -511,8 +515,9 @@ export function App() {
     [aiUsage.snapshot, preferences.pinnedAiProviders, preferences.aiBudgets],
   );
 
-  const collapsedTargetMode: Mode =
-    activity.ongoing.length > 0
+  const collapsedTargetMode: Mode = suppressNotchForFullscreen
+    ? "hidden"
+    : activity.ongoing.length > 0
       ? "compactBadge"
       : activity.activeBanner
         ? "activity"
@@ -536,6 +541,9 @@ export function App() {
 
   useEffect(() => {
     void load();
+    void invoke<boolean>("get_fullscreen_state")
+      .then((active) => setFullscreenActive(active))
+      .catch(() => {});
     const stopAct = activity.init();
     const stopUpd = updater.init();
     return () => {
@@ -585,12 +593,16 @@ export function App() {
   // Synchronize collapsed presentation when visibility setting, ongoing badge, or banner changes.
   useEffect(() => {
     if (!ready) return;
-    if (mode !== "expanded" && mode !== "preview" && mode !== "dragTarget") {
+    if (
+      mode !== "expanded" &&
+      mode !== "dragTarget" &&
+      (mode !== "preview" || suppressNotchForFullscreen)
+    ) {
       if (requestedMode.current !== collapsedTargetMode) {
         void changeMode(collapsedTargetMode);
       }
     }
-  }, [ready, collapsedTargetMode, mode, changeMode]);
+  }, [ready, collapsedTargetMode, suppressNotchForFullscreen, mode, changeMode]);
 
   // Smoothly animate resized expanded panel when panel size preset changes.
   useEffect(() => {
@@ -667,6 +679,7 @@ export function App() {
         void changeMode(next, { focus: next === "expanded" });
       }),
       listen<boolean>("peek-visibility", ({ payload }) => setVisible(payload)),
+      listen<boolean>("fullscreen-changed", ({ payload }) => setFullscreenActive(payload)),
       listen("top-edge-hover", () => {
         clearTimeout(leavePreviewTimer.current);
         clearTimeout(autoCloseTimer.current);

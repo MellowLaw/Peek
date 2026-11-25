@@ -287,6 +287,13 @@ export function SettingsPanel() {
               </div>
 
               <SettingSwitch
+                label="Hide in fullscreen"
+                checked={preferences.hideInFullscreen}
+                disabled={!ready || saving}
+                onChange={(checked) => void save({ hideInFullscreen: checked })}
+              />
+
+              <SettingSwitch
                 label="Hover toolbar"
                 checked={preferences.hoverPreview}
                 disabled={!ready || saving}

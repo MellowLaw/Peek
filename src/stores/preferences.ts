@@ -21,6 +21,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   hoverPreview: true,
   hoverDelayMs: 80,
   alwaysVisible: true,
+  hideInFullscreen: true,
   autoCloseMode: "leaveAndClick",
   reducedMotion: false,
   accent: "neutral",

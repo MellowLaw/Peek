@@ -58,6 +58,9 @@ fn on_shortcut(app: &AppHandle, kind: ShortcutKind) {
     }
     match kind {
         ShortcutKind::Toggle => {
+            app.state::<island::UserHidden>()
+                .0
+                .store(false, Ordering::SeqCst);
             if let Some(window) = app.get_webview_window("main") {
                 let result = window.is_visible().and_then(|visible| {
                     if !visible {
@@ -130,6 +133,8 @@ fn main() {
         .manage(island::Transition::default())
         .manage(island::CurrentMode::default())
         .manage(island::CurrentLogicalSize::default())
+        .manage(island::FullscreenActive::default())
+        .manage(island::UserHidden::default())
         .manage(windows::ForegroundTracker::default())
         .manage(capture::CaptureState::default())
         .manage(system_controls::SystemMetricsState::default())
@@ -211,6 +216,7 @@ fn main() {
             island::prepare_island_transition,
             island::settle_island_transition,
             island::focus_island_window,
+            island::get_fullscreen_state,
             island::list_monitors,
             shortcut_available,
             preferences::get_preferences,
@@ -379,6 +385,7 @@ fn main() {
             app.manage(island::start_visibility_watcher(
                 app.handle().clone(),
                 initial_prefs.always_visible,
+                initial_prefs.hide_in_fullscreen,
             ));
             app.manage(island::start_expanded_watchdog(app.handle().clone()));
 
@@ -409,13 +416,22 @@ fn main() {
                         app.exit(0);
                     } else if let Some(window) = app.get_webview_window("main") {
                         let result = if event.id.as_ref() == "settings" {
+                            app.state::<island::UserHidden>()
+                                .0
+                                .store(false, Ordering::SeqCst);
                             island::show_island_window(&window)
                                 .and_then(|_| window.emit("peek-visibility", true))
                                 .and_then(|_| window.emit("open-settings", ()))
                         } else if event.id.as_ref() == "show" {
+                            app.state::<island::UserHidden>()
+                                .0
+                                .store(false, Ordering::SeqCst);
                             island::show_island_window(&window)
                                 .and_then(|_| window.emit("peek-visibility", true))
                         } else {
+                            app.state::<island::UserHidden>()
+                                .0
+                                .store(true, Ordering::SeqCst);
                             window
                                 .hide()
                                 .and_then(|_| window.emit("peek-visibility", false))

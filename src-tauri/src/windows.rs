@@ -476,6 +476,186 @@ pub fn right_mouse_down() -> bool {
     unsafe { (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000) != 0 }
 }
 
+const IGNORED_FULLSCREEN_CLASSES: &[&str] = &[
+    "Progman",
+    "WorkerW",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "DV2ControlHost",
+    "Windows.UI.Core.CoreWindow",
+];
+
+pub(crate) fn is_rect_fullscreen_on_monitor(
+    win_rect: (i32, i32, i32, i32),
+    mon_rect: (i32, i32, i32, i32),
+    work_rect: (i32, i32, i32, i32),
+    style: u32,
+    is_zoomed: bool,
+    class_name: &str,
+) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{WS_CAPTION, WS_THICKFRAME};
+
+    let mon_w = mon_rect.2 - mon_rect.0;
+    let mon_h = mon_rect.3 - mon_rect.1;
+    if mon_w <= 0 || mon_h <= 0 {
+        return false;
+    }
+
+    let trimmed = class_name.trim();
+    if trimmed.is_empty()
+        || IGNORED_FULLSCREEN_CLASSES
+            .iter()
+            .any(|ignored| trimmed.eq_ignore_ascii_case(ignored))
+    {
+        return false;
+    }
+
+    let covers_monitor = win_rect.0 <= mon_rect.0 + 2
+        && win_rect.1 <= mon_rect.1 + 2
+        && win_rect.2 >= mon_rect.2 - 2
+        && win_rect.3 >= mon_rect.3 - 2;
+    if !covers_monitor {
+        return false;
+    }
+
+    let work_matches_monitor = (work_rect.0 - mon_rect.0).abs() <= 4
+        && (work_rect.1 - mon_rect.1).abs() <= 4
+        && (work_rect.2 - mon_rect.2).abs() <= 4
+        && (work_rect.3 - mon_rect.3).abs() <= 4;
+    if work_matches_monitor
+        && is_zoomed
+        && (style & WS_CAPTION.0) == WS_CAPTION.0
+        && (style & WS_THICKFRAME.0) != 0
+    {
+        return false;
+    }
+
+    true
+}
+
+/// Check whether an external fullscreen app/game is currently active on `mon_rect`.
+pub fn is_fullscreen_app_on_monitor(
+    mon_rect: (i32, i32, i32, i32),
+    work_rect: (i32, i32, i32, i32),
+    peek_hwnds: &[isize],
+    fallback_external: Option<isize>,
+) -> bool {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect, IsIconic, IsWindow,
+        IsWindowVisible, IsZoomed, GWL_STYLE,
+    };
+
+    unsafe {
+        let fg = GetForegroundWindow();
+        let fg_raw = fg.0 as isize;
+        let target = if fg_raw != 0 && !peek_hwnds.contains(&fg_raw) {
+            fg
+        } else if let Some(ext) = fallback_external {
+            if ext == 0 || peek_hwnds.contains(&ext) {
+                return false;
+            }
+            HWND(ext as _)
+        } else {
+            return false;
+        };
+
+        if !IsWindow(Some(target)).as_bool()
+            || !IsWindowVisible(target).as_bool()
+            || IsIconic(target).as_bool()
+        {
+            return false;
+        }
+
+        let mut rc = RECT::default();
+        if GetWindowRect(target, &mut rc).is_ok() {
+            let style = GetWindowLongW(target, GWL_STYLE) as u32;
+            let zoomed = IsZoomed(target).as_bool();
+            let mut class_buf = [0u16; 64];
+            let class_len = GetClassNameW(target, &mut class_buf);
+            let class_name = if class_len > 0 {
+                String::from_utf16_lossy(&class_buf[..class_len as usize])
+            } else {
+                String::new()
+            };
+            if is_rect_fullscreen_on_monitor(
+                (rc.left, rc.top, rc.right, rc.bottom),
+                mon_rect,
+                work_rect,
+                style,
+                zoomed,
+                &class_name,
+            ) {
+                return true;
+            }
+        }
+
+        if let Ok(state) = SHQueryUserNotificationState() {
+            if state == QUNS_RUNNING_D3D_FULL_SCREEN {
+                let mon = MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST);
+                let mut info = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetMonitorInfoW(mon, &mut info).as_bool() {
+                    let m = info.rcMonitor;
+                    if (m.left - mon_rect.0).abs() <= 2
+                        && (m.top - mon_rect.1).abs() <= 2
+                        && (m.right - mon_rect.2).abs() <= 2
+                        && (m.bottom - mon_rect.3).abs() <= 2
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Toggle raw Win32 HWND visibility without Tao's style-resetting wrappers, optionally
+/// re-asserting `HWND_TOPMOST` so Peek renders above fullscreen apps on hover reveal.
+pub fn set_island_window_visible_raw(
+    window: &WebviewWindow,
+    visible: bool,
+    assert_topmost: bool,
+) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SetWindowPos as WinSetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
+    };
+
+    let handle = window.hwnd().map_err(|error| error.to_string())?;
+    let hwnd = HWND(handle.0);
+    unsafe {
+        let is_vis = IsWindowVisible(hwnd).as_bool();
+        if visible {
+            if !is_vis {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            if assert_topmost {
+                let _ = WinSetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        } else if is_vis {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+    Ok(())
+}
+
 /// Position a window in exact raw physical virtual-desktop coordinates (used by the capture overlay).
 pub fn set_window_bounds_raw(
     window: &WebviewWindow,
@@ -1708,5 +1888,72 @@ mod tests {
         drop(first);
         let third = try_acquire_named_mutex(&name);
         assert!(third.is_some());
+    }
+
+    #[test]
+    fn fullscreen_rect_detection_distinguishes_games_maximized_and_desktop() {
+        use windows::Win32::UI::WindowsAndMessaging::{WS_CAPTION, WS_POPUP, WS_THICKFRAME};
+
+        let mon = (0, 0, 1920, 1080);
+        let work_with_taskbar = (0, 0, 1920, 1032);
+        let popup_style = WS_POPUP.0;
+        let desktop_max_style = (WS_CAPTION | WS_THICKFRAME).0;
+
+        // Borderless fullscreen game covers full monitor.
+        assert!(is_rect_fullscreen_on_monitor(
+            mon,
+            mon,
+            work_with_taskbar,
+            popup_style,
+            false,
+            "UnityWndClass",
+        ));
+        // Maximized desktop app stops above taskbar -> not fullscreen.
+        assert!(!is_rect_fullscreen_on_monitor(
+            work_with_taskbar,
+            mon,
+            work_with_taskbar,
+            desktop_max_style,
+            true,
+            "Chrome_WidgetWin_1",
+        ));
+        // Desktop and shell classes never trigger fullscreen hiding.
+        for shell_cls in ["Progman", "WorkerW", "Shell_TrayWnd", ""] {
+            assert!(!is_rect_fullscreen_on_monitor(
+                mon,
+                mon,
+                work_with_taskbar,
+                popup_style,
+                false,
+                shell_cls,
+            ));
+        }
+        // Auto-hide taskbar: normal maximized desktop app shouldn't count as fullscreen,
+        // while a borderless app/game covering the monitor still counts.
+        assert!(!is_rect_fullscreen_on_monitor(
+            mon,
+            mon,
+            mon,
+            desktop_max_style,
+            true,
+            "Chrome_WidgetWin_1",
+        ));
+        assert!(is_rect_fullscreen_on_monitor(
+            mon,
+            mon,
+            mon,
+            popup_style,
+            false,
+            "UnrealWindow",
+        ));
+        // Window on a secondary monitor doesn't trigger primary monitor fullscreen.
+        assert!(!is_rect_fullscreen_on_monitor(
+            (1920, 0, 3840, 1080),
+            mon,
+            work_with_taskbar,
+            popup_style,
+            false,
+            "SDL_app",
+        ));
     }
 }

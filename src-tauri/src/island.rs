@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewWindow};
@@ -32,7 +32,13 @@ impl Default for CurrentLogicalSize {
     }
 }
 
-pub struct VisibilityWatcher(pub watch::Sender<bool>);
+pub struct VisibilityWatcher(pub watch::Sender<(bool, bool)>);
+
+#[derive(Default)]
+pub struct FullscreenActive(pub AtomicBool);
+
+#[derive(Default)]
+pub struct UserHidden(pub AtomicBool);
 
 pub struct ExpandedWatchdog(pub std::sync::Arc<tokio::sync::Notify>);
 
@@ -342,21 +348,117 @@ pub fn show_island_window(window: &WebviewWindow) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn start_visibility_watcher(app: AppHandle, always_visible: bool) -> VisibilityWatcher {
-    let (tx, mut rx) = watch::channel(always_visible);
+#[tauri::command]
+pub fn get_fullscreen_state(state: tauri::State<'_, FullscreenActive>) -> bool {
+    state.0.load(Ordering::Relaxed)
+}
+
+pub fn start_visibility_watcher(
+    app: AppHandle,
+    always_visible: bool,
+    hide_in_fullscreen: bool,
+) -> VisibilityWatcher {
+    let (tx, mut rx) = watch::channel((always_visible, hide_in_fullscreen));
     tauri::async_runtime::spawn(async move {
         let mut was_in_zone = false;
+        let mut dwell_started: Option<Instant> = None;
         let mut last_emit = Instant::now() - Duration::from_secs(5);
-        while rx.wait_for(|always| !*always).await.is_ok() {
+        let mut last_fs_check = Instant::now() - Duration::from_secs(5);
+
+        while rx
+            .wait_for(|&(always, hide_fs)| !always || hide_fs)
+            .await
+            .is_ok()
+        {
             loop {
-                if *rx.borrow() {
+                let (always_vis, hide_fs) = *rx.borrow();
+                if always_vis && !hide_fs {
+                    if app
+                        .state::<FullscreenActive>()
+                        .0
+                        .swap(false, Ordering::SeqCst)
+                    {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.emit("fullscreen-changed", false);
+                        }
+                    }
                     was_in_zone = false;
+                    dwell_started = None;
                     break;
                 }
+
                 #[cfg(windows)]
                 {
-                    let is_hidden = *app.state::<CurrentMode>().0.lock().unwrap() == Mode::Hidden;
-                    if is_hidden && !crate::windows::left_mouse_down() {
+                    if !hide_fs {
+                        if app
+                            .state::<FullscreenActive>()
+                            .0
+                            .swap(false, Ordering::SeqCst)
+                        {
+                            if let Some(win) = app.get_webview_window("main") {
+                                let _ = win.emit("fullscreen-changed", false);
+                            }
+                        }
+                    } else if last_fs_check.elapsed() >= Duration::from_millis(240) {
+                        last_fs_check = Instant::now();
+                        if let Some(win) = app.get_webview_window("main") {
+                            let pref_mon = app
+                                .state::<PreferencesState>()
+                                .0
+                                .lock()
+                                .unwrap()
+                                .monitor_name
+                                .clone();
+                            if let Ok(mon) = select_monitor(&win, &pref_mon) {
+                                let peek_hwnds = crate::windows::peek_hwnds(&app);
+                                let tracker = app.state::<crate::windows::ForegroundTracker>();
+                                tracker.record_if_external(&peek_hwnds);
+                                let fallback_ext = tracker.best_external(&peek_hwnds);
+                                let pos = mon.position();
+                                let size = mon.size();
+                                let mon_rect = (
+                                    pos.x,
+                                    pos.y,
+                                    pos.x + size.width as i32,
+                                    pos.y + size.height as i32,
+                                );
+                                let area = mon.work_area();
+                                let work_rect = (
+                                    area.position.x,
+                                    area.position.y,
+                                    area.position.x + area.size.width as i32,
+                                    area.position.y + area.size.height as i32,
+                                );
+                                let fs_now = crate::windows::is_fullscreen_app_on_monitor(
+                                    mon_rect,
+                                    work_rect,
+                                    &peek_hwnds,
+                                    fallback_ext,
+                                );
+                                let prev = app
+                                    .state::<FullscreenActive>()
+                                    .0
+                                    .swap(fs_now, Ordering::SeqCst);
+                                if fs_now != prev {
+                                    let _ = win.emit("fullscreen-changed", fs_now);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let fs_active =
+                    hide_fs && app.state::<FullscreenActive>().0.load(Ordering::Relaxed);
+                let user_hidden = app.state::<UserHidden>().0.load(Ordering::Relaxed);
+                let is_hidden = *app.state::<CurrentMode>().0.lock().unwrap() == Mode::Hidden;
+                let watch_cursor = !user_hidden && is_hidden && (!always_vis || fs_active);
+
+                #[cfg(windows)]
+                {
+                    if watch_cursor
+                        && !crate::windows::left_mouse_down()
+                        && !crate::windows::right_mouse_down()
+                    {
                         if let (Some(win), Some((cx, cy))) = (
                             app.get_webview_window("main"),
                             crate::windows::cursor_position(),
@@ -370,29 +472,57 @@ pub fn start_visibility_watcher(app: AppHandle, always_visible: bool) -> Visibil
                                 .clone();
                             if let Ok(mon) = select_monitor(&win, &pref_mon) {
                                 let scale = mon.scale_factor();
-                                let area = mon.work_area();
-                                let center_x = area.position.x + (area.size.width as i32) / 2;
+                                let pos = mon.position();
+                                let size = mon.size();
+                                let center_x = pos.x + (size.width as i32) / 2;
                                 let half_zone = (140.0 * scale).round() as i32;
-                                let top_threshold = area.position.y + (6.0 * scale).round() as i32;
+                                let top_threshold = pos.y + (6.0 * scale).round() as i32;
                                 let in_zone = cy <= top_threshold
-                                    && cy >= area.position.y - 4
+                                    && cy >= pos.y - 4
                                     && (cx - center_x).abs() <= half_zone;
-                                if in_zone && !was_in_zone {
-                                    if last_emit.elapsed() > Duration::from_millis(140) {
-                                        last_emit = Instant::now();
-                                        let _ = win.emit("top-edge-hover", ());
+                                if in_zone {
+                                    if fs_active {
+                                        if dwell_started.is_none() {
+                                            dwell_started = Some(Instant::now());
+                                        }
+                                        if !was_in_zone
+                                            && dwell_started.is_some_and(|t| {
+                                                t.elapsed() >= Duration::from_millis(100)
+                                            })
+                                            && last_emit.elapsed() > Duration::from_millis(180)
+                                        {
+                                            last_emit = Instant::now();
+                                            was_in_zone = true;
+                                            let _ = win.emit("top-edge-hover", ());
+                                        }
+                                    } else {
+                                        dwell_started = None;
+                                        if !was_in_zone
+                                            && last_emit.elapsed() > Duration::from_millis(140)
+                                        {
+                                            last_emit = Instant::now();
+                                            let _ = win.emit("top-edge-hover", ());
+                                        }
+                                        was_in_zone = true;
                                     }
+                                } else {
+                                    was_in_zone = false;
+                                    dwell_started = None;
                                 }
-                                was_in_zone = in_zone;
                             }
                         }
                     } else {
                         was_in_zone = false;
+                        dwell_started = None;
                     }
                 }
+
+                let sleep_ms = if watch_cursor { 25 } else { 250 };
                 tokio::select! {
-                    _ = rx.changed() => {}
-                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                    _ = rx.changed() => {
+                        last_fs_check = Instant::now() - Duration::from_secs(5);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {}
                 }
             }
         }
@@ -400,9 +530,9 @@ pub fn start_visibility_watcher(app: AppHandle, always_visible: bool) -> Visibil
     VisibilityWatcher(tx)
 }
 
-pub fn sync_visibility(app: &AppHandle, always_visible: bool) {
+pub fn sync_visibility(app: &AppHandle, always_visible: bool, hide_in_fullscreen: bool) {
     if let Some(watcher) = app.try_state::<VisibilityWatcher>() {
-        watcher.0.send_replace(always_visible);
+        watcher.0.send_replace((always_visible, hide_in_fullscreen));
     }
 }
 
@@ -465,19 +595,22 @@ pub async fn reanchor(app: &AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
     };
-    let (preferred_monitor, preset, always_visible) = {
+    let (preferred_monitor, preset, always_visible, hide_in_fullscreen) = {
         let prefs_state = app.state::<PreferencesState>();
         let prefs = prefs_state.0.lock().unwrap();
         (
             prefs.monitor_name.clone(),
             prefs.size_preset,
             prefs.always_visible,
+            prefs.hide_in_fullscreen,
         )
     };
+    let fs_suppressed =
+        hide_in_fullscreen && app.state::<FullscreenActive>().0.load(Ordering::Relaxed);
     let mut mode = *app.state::<CurrentMode>().0.lock().unwrap();
-    if (mode == Mode::Idle || mode == Mode::Lyrics) && !always_visible {
+    if (mode == Mode::Idle || mode == Mode::Lyrics) && (!always_visible || fs_suppressed) {
         mode = Mode::Hidden;
-    } else if mode == Mode::Hidden && always_visible {
+    } else if mode == Mode::Hidden && always_visible && !fs_suppressed {
         mode = Mode::Idle;
     }
     let metrics = monitor_metrics(&window, &preferred_monitor)?;
@@ -590,6 +723,8 @@ pub async fn prepare_island_transition(
         .0
         .fetch_add(1, Ordering::SeqCst)
         + 1;
+    let fs_active = app.state::<FullscreenActive>().0.load(Ordering::Relaxed);
+    let user_hidden = app.state::<UserHidden>().0.load(Ordering::Relaxed);
     let metrics = monitor_metrics(&window, &preferred_monitor)?;
     let (_, stage_size) = stage_physical_bounds(metrics);
     let canvas_w = even_px((prev_logical.0.max(next_w) + CANVAS_PAD_X_LOGICAL) * metrics.scale)
@@ -611,18 +746,29 @@ pub async fn prepare_island_transition(
                 if !is_dormant_mode(mode) {
                     crate::windows::set_webview_memory_low(&target, false);
                 }
-                crate::windows::enforce_frameless_popup(&target, should_focus).and_then(|_| {
-                    crate::windows::set_island_region(
+                let vis_res = if !matches!(mode, Mode::Hidden) && !user_hidden {
+                    crate::windows::set_island_window_visible_raw(
                         &target,
-                        stage_size.width,
-                        canvas_w,
-                        canvas_h,
-                        metrics.scale,
-                        0.0,
-                        0,
-                        false,
+                        true,
+                        fs_active || should_focus || !matches!(mode, Mode::Idle),
                     )
-                })
+                } else {
+                    Ok(())
+                };
+                vis_res
+                    .and_then(|_| crate::windows::enforce_frameless_popup(&target, should_focus))
+                    .and_then(|_| {
+                        crate::windows::set_island_region(
+                            &target,
+                            stage_size.width,
+                            canvas_w,
+                            canvas_h,
+                            metrics.scale,
+                            0.0,
+                            0,
+                            false,
+                        )
+                    })
             };
             #[cfg(not(windows))]
             let res = {
@@ -668,6 +814,8 @@ pub async fn settle_island_transition(
     #[cfg(not(windows))]
     let drag_active = false;
     let focusable = expanded && !drag_active;
+    let fs_active = app.state::<FullscreenActive>().0.load(Ordering::Relaxed);
+    let user_hidden = app.state::<UserHidden>().0.load(Ordering::Relaxed);
 
     let (send, receive) = tokio::sync::oneshot::channel();
     let target = window.clone();
@@ -681,7 +829,12 @@ pub async fn settle_island_transition(
             let res = {
                 let res = crate::windows::enforce_frameless_popup(&target, focusable)
                     .and_then(|_| apply_settled_region(&target, mode, next_w, next_h, metrics))
-                    .map(|_| true);
+                    .and_then(|_| {
+                        if matches!(mode, Mode::Hidden) && (fs_active || user_hidden) {
+                            crate::windows::set_island_window_visible_raw(&target, false, false)?;
+                        }
+                        Ok(true)
+                    });
                 if res.is_ok() {
                     crate::windows::set_webview_memory_low(&target, is_dormant_mode(mode));
                 }
@@ -736,6 +889,8 @@ pub async fn set_island_mode(
         .0
         .fetch_add(1, Ordering::SeqCst)
         + 1;
+    let fs_active = app.state::<FullscreenActive>().0.load(Ordering::Relaxed);
+    let user_hidden = app.state::<UserHidden>().0.load(Ordering::Relaxed);
 
     let (send, receive) = tokio::sync::oneshot::channel();
     let target = window.clone();
@@ -747,10 +902,22 @@ pub async fn set_island_mode(
             }
             #[cfg(windows)]
             let result = {
-                let res = crate::windows::enforce_frameless_popup(&target, expanded)
+                let vis_res = if !matches!(mode, Mode::Hidden) && !user_hidden {
+                    crate::windows::set_island_window_visible_raw(
+                        &target,
+                        true,
+                        fs_active || expanded,
+                    )
+                } else {
+                    Ok(())
+                };
+                let res = vis_res
+                    .and_then(|_| crate::windows::enforce_frameless_popup(&target, expanded))
                     .and_then(|_| apply_settled_region(&target, mode, w, h, metrics))
                     .and_then(|_| {
-                        if expanded {
+                        if matches!(mode, Mode::Hidden) && (fs_active || user_hidden) {
+                            crate::windows::set_island_window_visible_raw(&target, false, false)?;
+                        } else if expanded {
                             target.set_focus().map_err(|error| error.to_string())?;
                         }
                         Ok(true)

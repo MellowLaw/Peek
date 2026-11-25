@@ -51,9 +51,8 @@ jobs:
           releaseName: "Peek v__VERSION__"
           releaseBody: |
             ### What's New in Peek v__VERSION__
-            - Moved the Music player/source switcher (**Active (Auto)** + active media apps) into the Music settings gear popover for a cleaner player card
-            - Added top-level **Send** (Send to phone) QR transfer button alongside **Receive** in the Files tab with a mobile Download / Download all page
-            - Fixed Lyrics opening blank while the notch expands and smoothed synced lyric scrolling (container-level GPU scrolling, instant open/resize snap, and leaner 60fps letter sweep)
+            - Automatically hides the notch when a fullscreen game or app is active (`Hide in fullscreen`, on by default in **Settings → Notch → Behavior**) with OS-level window hiding so zero pixels or hit targets remain
+            - Move your mouse up to the top-center edge (`100ms` dwell) to reveal Peek cleanly on top of fullscreen apps and auto-hide straight back when you leave
 
             ### How to Download & Install
 

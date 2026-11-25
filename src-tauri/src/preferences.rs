@@ -80,6 +80,8 @@ pub struct Preferences {
     pub hover_preview: bool,
     pub hover_delay_ms: u32,
     pub always_visible: bool,
+    #[serde(default = "default_true")]
+    pub hide_in_fullscreen: bool,
     pub auto_close_mode: AutoCloseMode,
     pub reduced_motion: bool,
     pub accent: Accent,
@@ -120,6 +122,7 @@ impl Default for Preferences {
             hover_preview: true,
             hover_delay_ms: 80,
             always_visible: true,
+            hide_in_fullscreen: true,
             auto_close_mode: AutoCloseMode::LeaveAndClick,
             reduced_motion: false,
             accent: Accent::Neutral,
@@ -359,8 +362,10 @@ pub async fn save_preferences(
             .set_clipboard_enabled(next.clipboard_history_enabled);
     }
 
-    if next.always_visible != previous.always_visible {
-        crate::island::sync_visibility(&app, next.always_visible);
+    if next.always_visible != previous.always_visible
+        || next.hide_in_fullscreen != previous.hide_in_fullscreen
+    {
+        crate::island::sync_visibility(&app, next.always_visible, next.hide_in_fullscreen);
     }
 
     if next.local_api_enabled != previous.local_api_enabled
@@ -379,6 +384,7 @@ pub async fn save_preferences(
     if next.monitor_name != previous.monitor_name
         || next.size_preset != previous.size_preset
         || next.always_visible != previous.always_visible
+        || next.hide_in_fullscreen != previous.hide_in_fullscreen
     {
         let _ = crate::island::reanchor(&app).await;
     }
@@ -399,6 +405,7 @@ mod tests {
         let normalized = preferences.normalize();
         assert!(!normalized.hover_preview);
         assert!(normalized.always_visible);
+        assert!(normalized.hide_in_fullscreen);
         assert_eq!(
             serde_json::to_value(normalized.auto_close_mode).unwrap(),
             "leaveAndClick"

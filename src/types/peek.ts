@@ -40,6 +40,7 @@ export type Preferences = {
   hoverPreview: boolean;
   hoverDelayMs: number;
   alwaysVisible: boolean;
+  hideInFullscreen: boolean;
   autoCloseMode: AutoCloseMode;
   reducedMotion: boolean;
   accent: Accent;
