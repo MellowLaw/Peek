@@ -1681,6 +1681,116 @@ function sendOne(file) {{
     )
 }
 
+fn escape_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn format_bytes_human(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn render_send_page(files: &[(String, u64, String)]) -> String {
+    const PEEK_ICON_SVG: &str = include_str!("../icons/peek-icon.svg");
+    let icon_b64 = STANDARD.encode(PEEK_ICON_SVG.as_bytes());
+    let mut rows = String::new();
+    for (name, size, href) in files {
+        let safe_name = escape_html(name);
+        let safe_href = escape_html(href);
+        let size_label = format_bytes_human(*size);
+        rows.push_str(&format!(
+            r#"<div class="item"><div class="info"><div class="name" title="{safe_name}">{safe_name}</div><div class="sz">{size_label}</div></div><a class="dl" href="{safe_href}" download="{safe_name}">Download</a></div>"#
+        ));
+    }
+    let count_note = if files.len() == 1 {
+        "1 file ready to save on your phone.".to_string()
+    } else {
+        format!("{} files ready to save on your phone.", files.len())
+    };
+    let all_btn = if files.len() > 1 {
+        r#"<button id="dlAll" class="pick" type="button">Download all</button>"#
+    } else {
+        ""
+    };
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Download from Peek</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,{icon_b64}" />
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ margin: 0; padding: 24px 16px; background: #080808; color: #f4f4f4; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+  .wrap {{ max-width: 420px; margin: 0 auto; display: grid; gap: 14px; }}
+  .card {{ background: #141414; border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 18px; display: grid; gap: 12px; }}
+  .brand-row {{ display: flex; align-items: center; gap: 10px; }}
+  .brand-icon {{ width: 28px; height: 28px; flex: none; display: block; }}
+  .brand-icon svg {{ width: 100%; height: 100%; display: block; }}
+  h1 {{ margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }}
+  p {{ margin: 0; font-size: 13px; color: #9e9e9e; line-height: 1.4; }}
+  .pick {{ display: block; width: 100%; border: 0; text-align: center; background: #f4f4f4; color: #080808; font-weight: 700; font-size: 14px; padding: 12px 16px; border-radius: 999px; cursor: pointer; }}
+  .list {{ display: grid; gap: 8px; }}
+  .item {{ background: #141414; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }}
+  .info {{ min-width: 0; display: grid; gap: 2px; }}
+  .name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; }}
+  .sz {{ font-size: 11.5px; color: #9e9e9e; font-variant-numeric: tabular-nums; }}
+  .dl {{ flex: none; text-decoration: none; background: #f4f4f4; color: #080808; font-weight: 700; font-size: 12.5px; padding: 8px 13px; border-radius: 999px; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="brand-row">
+      <span class="brand-icon" aria-hidden="true">{peek_icon_svg}</span>
+      <h1>Download from Desktop</h1>
+    </div>
+    <p>{count_note}</p>
+    {all_btn}
+  </div>
+  <div class="list">{rows}</div>
+</div>
+<script>
+const btn = document.getElementById("dlAll");
+if (btn) {{
+  btn.addEventListener("click", () => {{
+    const links = Array.from(document.querySelectorAll("a.dl"));
+    links.forEach((a, idx) => {{
+      setTimeout(() => a.click(), idx * 450);
+    }});
+  }});
+}}
+</script>
+</body>
+</html>"#,
+        icon_b64 = icon_b64,
+        peek_icon_svg = PEEK_ICON_SVG,
+        count_note = count_note,
+        all_btn = all_btn,
+        rows = rows,
+    )
+}
+
 fn firewall_blocked_now() -> bool {
     #[cfg(windows)]
     {
@@ -1947,6 +2057,223 @@ pub async fn start_qr_transfer(
                                 break;
                             }
                         }
+                    });
+                }
+            }
+        }
+        let st = app_for_task.state::<ShelfState>();
+        let mut guard = st.inner.lock().unwrap();
+        if guard.qr_active.as_ref().is_some_and(|(s, _)| *s == seq) {
+            guard.qr_active = None;
+            guard.qr_stop = None;
+            drop(guard);
+            let _ = app_for_task.emit("qr-transfer-updated", Option::<QrTransferInfo>::None);
+        }
+    });
+
+    Ok(info)
+}
+
+async fn handle_qr_send_connection(
+    mut socket: tokio::net::TcpStream,
+    page: &str,
+    page_route: &str,
+    dl_prefix: &str,
+    files: &[(PathBuf, String)],
+) {
+    let Some((buf, header_end)) = read_http_headers(&mut socket).await else {
+        return;
+    };
+    let header_str = String::from_utf8_lossy(&buf[..header_end]);
+    let first_line = header_str.lines().next().unwrap_or("");
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let full_target = parts.next().unwrap_or("");
+    let (req_path, _) = full_target.split_once('?').unwrap_or((full_target, ""));
+
+    if method != "GET" {
+        let _ = socket
+            .write_all(
+                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 18\r\nConnection: close\r\n\r\nMethod Not Allowed",
+            )
+            .await;
+        return;
+    }
+
+    if constant_time_eq(req_path.as_bytes(), page_route.as_bytes()) {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            page.len(),
+            page
+        );
+        let _ = socket.write_all(resp.as_bytes()).await;
+        return;
+    }
+
+    if req_path.len() > dl_prefix.len()
+        && constant_time_eq(
+            &req_path.as_bytes()[..dl_prefix.len()],
+            dl_prefix.as_bytes(),
+        )
+    {
+        if let Ok(idx) = req_path[dl_prefix.len()..].parse::<usize>() {
+            if let Some((path, name)) = files.get(idx) {
+                let Ok(mut f) = File::open(path) else {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 7\r\nConnection: close\r\n\r\nMissing",
+                        )
+                        .await;
+                    return;
+                };
+                let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                let clean_header_name = sanitize_content_disposition_name(name);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {len}\r\nContent-Disposition: attachment; filename=\"{clean_header_name}\"\r\nConnection: close\r\n\r\n"
+                );
+                if socket.write_all(header.as_bytes()).await.is_err() {
+                    return;
+                }
+                let mut chunk = vec![0u8; 64 * 1024];
+                loop {
+                    let Ok(read_n) = f.read(&mut chunk) else {
+                        break;
+                    };
+                    if read_n == 0 {
+                        break;
+                    }
+                    if socket.write_all(&chunk[..read_n]).await.is_err() {
+                        break;
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    let _ = socket
+        .write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found",
+        )
+        .await;
+}
+
+#[tauri::command]
+pub async fn start_qr_send_files(
+    app: AppHandle,
+    state: tauri::State<'_, ShelfState>,
+    ids: Vec<String>,
+) -> Result<QrTransferInfo, String> {
+    let entries = {
+        let mut guard = state.inner.lock().unwrap();
+        if let Some(prev) = guard.qr_stop.take() {
+            let _ = prev.send(());
+        }
+        guard.qr_active = None;
+        guard.entries.clone()
+    };
+
+    let selected: Vec<(PathBuf, String, u64)> = if ids.is_empty() {
+        entries
+            .into_iter()
+            .filter_map(|e| {
+                let pb = PathBuf::from(&e.path);
+                if pb.is_file() {
+                    let sz = fs::metadata(&pb).map(|m| m.len()).unwrap_or(0);
+                    Some((pb, e.name, sz))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        ids.iter()
+            .filter_map(|id| entries.iter().find(|e| &e.id == id))
+            .filter_map(|e| {
+                let pb = PathBuf::from(&e.path);
+                if pb.is_file() {
+                    let sz = fs::metadata(&pb).map(|m| m.len()).unwrap_or(0);
+                    Some((pb, e.name.clone(), sz))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    if selected.is_empty() {
+        return Err("Stage or pick at least one file to send".into());
+    }
+
+    let listener = TcpListener::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let ip = detect_lan_ip();
+    #[cfg(windows)]
+    let token = crate::windows::generate_random_hex(16);
+    #[cfg(not(windows))]
+    let token = "localtoken".to_string();
+
+    let page_route = format!("/send/{token}");
+    let dl_prefix = format!("/send/{token}/dl/");
+    let url = format!("http://{ip}:{port}{page_route}");
+    let qr_data_url = render_qr_data_url(&url)?;
+
+    let page_files: Vec<(String, u64, String)> = selected
+        .iter()
+        .enumerate()
+        .map(|(i, (_, name, sz))| (name.clone(), *sz, format!("{dl_prefix}{i}")))
+        .collect();
+    let html_page = render_send_page(&page_files);
+
+    let file_name = if selected.len() == 1 {
+        selected[0].1.clone()
+    } else {
+        format!("Send {} files to phone", selected.len())
+    };
+
+    let info = QrTransferInfo {
+        file_name,
+        url,
+        qr_data_url,
+        expires_in_seconds: 300,
+        mode: "send".into(),
+        save_dir: None,
+        received_count: 0,
+        last_received: None,
+        firewall_blocked: firewall_blocked_now(),
+    };
+
+    let (stop_tx, mut stop_rx) = oneshot::channel();
+    let seq = {
+        let mut guard = state.inner.lock().unwrap();
+        guard.qr_seq += 1;
+        let seq = guard.qr_seq;
+        guard.qr_stop = Some(stop_tx);
+        guard.qr_active = Some((seq, info.clone()));
+        seq
+    };
+    let _ = app.emit("qr-transfer-updated", Some(&info));
+
+    let serve_files: Vec<(PathBuf, String)> =
+        selected.into_iter().map(|(p, n, _)| (p, n)).collect();
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let deadline = tokio::time::sleep(Duration::from_secs(300));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = &mut deadline => break,
+                accepted = listener.accept() => {
+                    let Ok((socket, _)) = accepted else { continue; };
+                    let page = html_page.clone();
+                    let p_route = page_route.clone();
+                    let d_prefix = dl_prefix.clone();
+                    let f_list = serve_files.clone();
+                    tauri::async_runtime::spawn(async move {
+                        handle_qr_send_connection(socket, &page, &p_route, &d_prefix, &f_list).await;
                     });
                 }
             }
@@ -2328,6 +2655,76 @@ mod tests {
             let (saved_path, saved_name) = server.await.unwrap().expect("upload saved");
             assert_eq!(saved_name, "my note.txt");
             assert_eq!(fs::read(saved_path).unwrap(), b"hello from phone");
+        });
+    }
+
+    #[test]
+    fn qr_send_batch_http_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let file_a = dir.path().join("photo.png");
+        fs::write(&file_a, b"png-data-here").unwrap();
+
+        let route = "/send/tokabc".to_string();
+        let dl_prefix = "/send/tokabc/dl/".to_string();
+        let page = render_send_page(&[("photo.png".into(), 13, format!("{dl_prefix}0"))]);
+        let files = vec![(file_a, "photo.png".to_string())];
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let srv_page = page.clone();
+            let srv_route = route.clone();
+            let srv_prefix = dl_prefix.clone();
+            let srv_files = files.clone();
+            let server = tokio::spawn(async move {
+                for _ in 0..3 {
+                    let (sock, _) = listener.accept().await.unwrap();
+                    handle_qr_send_connection(sock, &srv_page, &srv_route, &srv_prefix, &srv_files)
+                        .await;
+                }
+            });
+
+            // 1) GET listing HTML
+            let mut s1 = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s1.write_all(format!("GET {route} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut resp1 = String::new();
+            s1.read_to_string(&mut resp1).await.unwrap();
+            assert!(resp1.starts_with("HTTP/1.1 200 OK"));
+            assert!(resp1.contains("photo.png"));
+
+            // 2) GET file 0
+            let mut s2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s2.write_all(
+                format!("GET {dl_prefix}0 HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+            let mut resp2 = Vec::new();
+            s2.read_to_end(&mut resp2).await.unwrap();
+            let resp2_str = String::from_utf8_lossy(&resp2);
+            assert!(resp2_str.starts_with("HTTP/1.1 200 OK"));
+            assert!(resp2_str.contains("filename=\"photo.png\""));
+            assert!(resp2.ends_with(b"png-data-here"));
+
+            // 3) Invalid index -> 404
+            let mut s3 = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s3.write_all(
+                format!("GET {dl_prefix}9 HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+            let mut resp3 = String::new();
+            s3.read_to_string(&mut resp3).await.unwrap();
+            assert!(resp3.starts_with("HTTP/1.1 404 Not Found"));
+
+            server.await.unwrap();
         });
     }
 }

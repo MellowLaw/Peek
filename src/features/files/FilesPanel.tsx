@@ -219,6 +219,28 @@ export function FilesPanel({
     }
   }
 
+  async function toggleSend() {
+    if (qrInfo?.mode === "send") {
+      await stopQr();
+      return;
+    }
+    let sendIds = items.filter((i) => i.exists && !i.isDir).map((i) => i.id);
+    if (sendIds.length === 0) {
+      const next = await runAction(() => invoke<ShelfItem[]>("pick_shelf_files"));
+      if (!next) return;
+      setItems(next);
+      sendIds = next.filter((i) => i.exists && !i.isDir).map((i) => i.id);
+      if (sendIds.length === 0) return;
+    }
+    const info = await runAction(() =>
+      invoke<QrTransferInfo>("start_qr_send_files", { ids: sendIds }),
+    );
+    if (info) {
+      prevReceivedCountRef.current = 0;
+      setQrInfo(info);
+    }
+  }
+
   async function handleAllowFirewall() {
     const next = await runAction(
       () => invoke<QrTransferInfo | null>("allow_lan_firewall"),
@@ -273,6 +295,16 @@ export function FilesPanel({
           >
             <Smartphone size={13} />
             <span>Receive</span>
+          </button>
+          <button
+            type="button"
+            className={"btn sm" + (qrInfo?.mode === "send" ? " primary" : "")}
+            title="Send files to your phone over Wi-Fi"
+            aria-pressed={qrInfo?.mode === "send"}
+            onClick={() => void toggleSend()}
+          >
+            <QrCode size={13} />
+            <span>Send</span>
           </button>
           {existingIds.length > 0 && (
             <button
@@ -367,7 +399,7 @@ export function FilesPanel({
               <span className="status-note">
                 {qrInfo.mode === "receive"
                   ? "Scan on the same Wi-Fi · Saves to Downloads\\Peek"
-                  : "Scan on the same Wi-Fi network"}
+                  : "Scan on the same Wi-Fi · Tap to download on phone"}
               </span>
               <div className="qr-url-row">
                 <code className="qr-url">{qrInfo.url}</code>

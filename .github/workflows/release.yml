@@ -51,14 +51,9 @@ jobs:
           releaseName: "Peek v__VERSION__"
           releaseBody: |
             ### What's New in Peek v__VERSION__
-            - Tier 1 WebView2 RAM optimization (`LOW` memory target when collapsed + lazy panels)
-            - Self-healing sign-in startup check & transparent WebView2 backing fix (zero white flash)
-            - Smoother Lyrics hover animations (pre-blurred art backdrop + leaner 60fps loop) & reliable auto-close
-            - `Ctrl+Alt+S` Notch Capture Bar (Region default with notch hidden pre-shot, instant Switch / OCR / Color)
-            - Checklist / To-Do mode in Notes & live-synced floating sticky notes
-            - Bento Settings redesign with tactile Delay slider + rotary App mixer dials & slim dark scrollbars
-            - Camera **Captures** folder button, corner-draggable Floating Camera resize, and GPU **Enhance** (`Natural` / `Studio`)
-            - Floating Patch Notes update popup beneath the notch & NSIS setup Terms & Conditions
+            - Moved the Music player/source switcher (**Active (Auto)** + active media apps) into the Music settings gear popover for a cleaner player card
+            - Added top-level **Send** (Send to phone) QR transfer button alongside **Receive** in the Files tab with a mobile Download / Download all page
+            - Fixed Lyrics opening blank while the notch expands and smoothed synced lyric scrolling (container-level GPU scrolling, instant open/resize snap, and leaner 60fps letter sweep)
 
             ### How to Download & Install
 

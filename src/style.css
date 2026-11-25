@@ -1064,6 +1064,45 @@ button:disabled, input:disabled, select:disabled {
   background: rgba(255, 255, 255, 0.9);
   color: #080808;
 }
+.music-popover-section {
+  display: grid;
+  gap: 5px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+.music-popover-label {
+  font-size: 10px;
+  font-weight: 650;
+  color: rgba(255, 255, 255, 0.56);
+}
+.music-popover-sources {
+  display: grid;
+  gap: 3px;
+  max-height: 82px;
+  overflow-y: auto;
+}
+.music-popover-source-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 7px;
+  border-radius: 7px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.78);
+  text-align: left;
+  transition: background 120ms ease, color 120ms ease;
+}
+.music-popover-source-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+.music-popover-source-btn.is-active {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  font-weight: 600;
+}
 
 .music-progress-row {
   display: flex;
@@ -1123,6 +1162,13 @@ button:disabled, input:disabled, select:disabled {
   display: flex;
   flex-direction: column;
   padding: 50px 6px 0;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  transition: transform 0.44s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.lyrical-viewport.no-scroll-transition .lyrical-container,
+.lyrical-viewport.no-scroll-transition .lyrical-line {
+  transition: none !important;
 }
 .lyrical-tail-spacer {
   height: 56px;
@@ -1136,13 +1182,11 @@ button:disabled, input:disabled, select:disabled {
   padding: 5px 0;
   color: rgba(255, 255, 255, 0.4);
   opacity: 0.72;
-  transform: scale(0.94) translateY(8px);
+  transform: scale(0.94);
   transform-origin: left center;
-  will-change: transform, opacity;
-  transition: color 0.42s cubic-bezier(0.25, 1, 0.5, 1),
-              transform 0.52s cubic-bezier(0.32, 1.25, 0.6, 1),
-              opacity 0.42s cubic-bezier(0.25, 1, 0.5, 1),
-              filter 0.48s cubic-bezier(0.25, 1, 0.5, 1);
+  transition: color 0.32s ease,
+              transform 0.38s cubic-bezier(0.22, 1, 0.36, 1),
+              opacity 0.34s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .lyrical-line.seekable { cursor: pointer; }
 .lyrical-line.active {
@@ -1150,9 +1194,10 @@ button:disabled, input:disabled, select:disabled {
   opacity: 1;
 }
 .lyrical-line.past {
-  color: rgba(255, 255, 255, 0.18);
-  opacity: 0.5;
+  color: rgba(255, 255, 255, 0.22);
+  opacity: 0.42;
 }
+.island-stage[data-reduce-motion="true"] .lyrical-container,
 .island-stage[data-reduce-motion="true"] .lyrical-line,
 .island-stage[data-reduce-motion="true"] .lyrical-letter {
   transition: none !important;
@@ -1270,6 +1315,9 @@ button:disabled, input:disabled, select:disabled {
   width: 100%;
   height: 100%;
   padding: 0;
+  transform: none;
+  transition: none;
+  will-change: auto;
 }
 .lyrical-viewport.single-line.is-overflowing .lyrical-container {
   -webkit-mask-image: linear-gradient(to right, black 0%, black 90%, transparent 100%);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Music2, Settings } from "lucide-react";
+import { Check, Music2, Settings } from "lucide-react";
 import { PinnedAiStrip, type PinnedAiItem } from "../../components/AiNotchIcons";
 import {
   SolidNextIcon,
@@ -552,6 +552,7 @@ function LyricalViewport({
   onTargetWidthChange?: (width: number) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
   const letterSpansRef = useRef<HTMLSpanElement[][]>([]);
@@ -559,6 +560,9 @@ function LyricalViewport({
   const clockRef = useRef(new PlaybackClock());
   const onTargetWidthChangeRef = useRef(onTargetWidthChange);
   onTargetWidthChangeRef.current = onTargetWidthChange;
+  const accentRgbRef = useRef(accentRgb);
+  accentRgbRef.current = accentRgb;
+  const applyFrameRef = useRef<((instant?: boolean) => void) | null>(null);
   const lastActiveIdxRef = useRef(-999);
   const lastReportedWidthRef = useRef(-1);
 
@@ -582,6 +586,7 @@ function LyricalViewport({
       },
       true,
     );
+    applyFrameRef.current?.(false);
   }, [
     lyrical.songId,
     lyrical.durationSeconds,
@@ -598,6 +603,7 @@ function LyricalViewport({
   useEffect(() => {
     if (seekClockSignal) {
       clockRef.current.seek(seekClockSignal.time);
+      applyFrameRef.current?.(false);
     }
   }, [seekClockSignal]);
 
@@ -605,6 +611,7 @@ function LyricalViewport({
     particlesRef.current = [];
     lastActiveIdxRef.current = -999;
     lastReportedWidthRef.current = -1;
+    lineRefs.current.length = displayLines.length;
     letterSpansRef.current = displayLines.map((_, i) => {
       const el = lineRefs.current[i];
       return el ? Array.from(el.querySelectorAll<HTMLSpanElement>(".lyrical-letter")) : [];
@@ -619,6 +626,7 @@ function LyricalViewport({
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       canvas.width = Math.max(1, Math.floor(viewport.clientWidth * dpr));
       canvas.height = Math.max(1, Math.floor(viewport.clientHeight * dpr));
+      applyFrameRef.current?.(true);
     };
     updateSize();
     const ro = new ResizeObserver(updateSize);
@@ -633,12 +641,44 @@ function LyricalViewport({
     let frameCount = 0;
     let prevStyledActiveIdx = -999;
     let prevStyledDisplayIdx = -999;
+    let prevVpWidth = -1;
     let prevVpHeight = -1;
+    let prevAnchorTop = -1;
+    let prevAnchorHeight = -1;
+    let hasPositioned = false;
+    let lastSweepLineIdx = -999;
+    let lastSweepAccentRgb = "";
+    let letterStates = new Int8Array(0); // -1 unset, 0 dim, 1 active, 2 lit
+    const liftedLetters = new Set<number>();
 
-    const applyFrame = () => {
+    const resetLineLetters = (lineIdx: number) => {
+      const entry = displayLines[lineIdx];
+      if (!entry || entry.isIntroDots) return;
+      const letterSpans = letterSpansRef.current[lineIdx] ?? [];
+      for (let w = 0; w < letterSpans.length; w++) {
+        const sp = letterSpans[w];
+        sp.style.color = "";
+        sp.style.textShadow = "";
+        sp.style.background = "";
+        sp.style.backgroundSize = "";
+        sp.style.backgroundPosition = "";
+        sp.style.backgroundClip = "";
+        sp.style.webkitBackgroundClip = "";
+        sp.style.webkitTextFillColor = "";
+        sp.style.transform = "";
+      }
+    };
+
+    const applyFrame = (forceInstant = false) => {
       const viewport = viewportRef.current;
       if (!viewport) return;
-      const vpHeight = viewport.clientHeight || 144;
+      const container = containerRef.current;
+      const vpWidth = viewport.clientWidth;
+      const vpHeight = viewport.clientHeight;
+      if (!singleLine && (vpWidth < 20 || vpHeight < 20)) {
+        return;
+      }
+      const effectiveVpHeight = vpHeight || 144;
       const lyricPos = clockRef.current.lyricsTime();
 
       let activeIdx = -1;
@@ -696,22 +736,34 @@ function LyricalViewport({
         }
       }
 
-      const lineStateChanged =
-        activeIdx !== prevStyledActiveIdx ||
-        displayIdx !== prevStyledDisplayIdx ||
-        vpHeight !== prevVpHeight;
+      const anchorIdx = activeIdx >= 0 ? activeIdx : 0;
+      const anchorElem =
+        !singleLine && displayLines.length > 0 ? (lineRefs.current[anchorIdx] ?? null) : null;
+      const anchorTop = anchorElem?.offsetTop ?? 0;
+      const anchorHeight = anchorElem?.clientHeight ?? 0;
 
-      if (lineStateChanged) {
-        prevStyledActiveIdx = activeIdx;
-        prevStyledDisplayIdx = displayIdx;
-        prevVpHeight = vpHeight;
+      const sizeOrLayoutChanged =
+        !singleLine &&
+        (vpWidth !== prevVpWidth ||
+          vpHeight !== prevVpHeight ||
+          anchorTop !== prevAnchorTop ||
+          anchorHeight !== prevAnchorHeight);
+      const activeChanged =
+        activeIdx !== prevStyledActiveIdx || displayIdx !== prevStyledDisplayIdx;
 
-        let targetY = 0;
-        if (!singleLine) {
-          const activeElem = activeIdx >= 0 ? lineRefs.current[activeIdx] : null;
-          if (activeElem) {
-            targetY = activeElem.offsetTop - vpHeight / 2 + activeElem.clientHeight / 2;
-          }
+      if (!hasPositioned || activeChanged || sizeOrLayoutChanged) {
+        const shouldSnap = forceInstant || !hasPositioned || sizeOrLayoutChanged || reduceMotion;
+        if (shouldSnap && !singleLine) {
+          viewport.classList.add("no-scroll-transition");
+        }
+
+        if (!singleLine && container) {
+          const rawTargetY = anchorElem
+            ? anchorTop - effectiveVpHeight / 2 + anchorHeight / 2
+            : 0;
+          const maxScroll = Math.max(0, container.scrollHeight - effectiveVpHeight / 2);
+          const targetY = Math.max(-(effectiveVpHeight / 2), Math.min(maxScroll, rawTargetY));
+          container.style.transform = `translate3d(0, ${(-targetY).toFixed(1)}px, 0)`;
         }
 
         for (let i = 0; i < displayLines.length; i++) {
@@ -729,60 +781,85 @@ function LyricalViewport({
             el.style.filter = "none";
             el.style.transitionDelay = "0s";
             if (i === displayIdx) {
-              el.style.transform = "translateY(0px) scale(1)";
+              el.style.transform = "translate3d(0, 0, 0) scale(1)";
               el.style.opacity = "1";
             } else if (i < displayIdx) {
-              el.style.transform = "translateY(-22px) scale(0.96)";
+              el.style.transform = "translate3d(0, -22px, 0) scale(0.96)";
               el.style.opacity = "0";
             } else {
-              el.style.transform = "translateY(22px) scale(0.96)";
+              el.style.transform = "translate3d(0, 22px, 0) scale(0.96)";
               el.style.opacity = "0";
             }
           } else {
-            const far = activeIdx >= 0 && Math.abs(i - activeIdx) > 10;
+            const dist = Math.abs(i - anchorIdx);
+            const far = dist > 12;
             el.style.visibility = far ? "hidden" : "visible";
             el.style.pointerEvents = far ? "none" : "auto";
-            el.style.opacity = "";
-            if (reduceMotion || far || activeIdx === -1 || i === activeIdx) {
-              el.style.filter = "none";
-            } else {
-              const dist = Math.abs(i - activeIdx);
-              el.style.filter = `blur(${Math.min(dist * 0.65, 2.2).toFixed(2)}px)`;
-            }
-
-            const cascadeDelay =
-              !reduceMotion && !far && activeIdx !== -1 && i > activeIdx
-                ? Math.min((i - activeIdx) * 0.045, 0.36)
-                : 0;
+            el.style.filter = "";
+            el.style.transitionDelay = "0s";
             if (i === activeIdx) {
-              el.style.transform = `translateY(${(-targetY).toFixed(1)}px) scale(1.035)`;
-            } else if (i < activeIdx) {
-              el.style.transform = `translateY(${(-targetY - 6).toFixed(1)}px) scale(0.92)`;
+              el.style.transform = "scale(1.03)";
+              el.style.opacity = "1";
             } else {
-              el.style.transform = `translateY(${(-targetY + 8).toFixed(1)}px) scale(0.94)`;
-            }
-            el.style.transitionDelay = `0s, ${cascadeDelay.toFixed(3)}s, 0s, ${cascadeDelay.toFixed(3)}s`;
-          }
-
-          const entry = displayLines[i];
-          if (i !== activeIdx && !entry.isIntroDots) {
-            const letterSpans = letterSpansRef.current[i] ?? [];
-            const dimColor =
-              i < activeIdx ? "rgba(255, 255, 255, 0.18)" : "rgba(255, 255, 255, 0.4)";
-            for (let w = 0; w < letterSpans.length; w++) {
-              const sp = letterSpans[w];
-              sp.style.color = dimColor;
-              sp.style.textShadow = "none";
-              sp.style.background = "";
-              sp.style.backgroundClip = "";
-              sp.style.webkitBackgroundClip = "";
-              sp.style.webkitTextFillColor = "";
-              sp.style.transform = "";
+              const scale = dist === 1 ? 0.955 : 0.935;
+              const opacity =
+                activeIdx === -1
+                  ? dist === 0
+                    ? 0.86
+                    : dist === 1
+                      ? 0.54
+                      : 0.32
+                  : i < activeIdx
+                    ? dist === 1
+                      ? 0.36
+                      : 0.22
+                    : dist === 1
+                      ? 0.58
+                      : dist === 2
+                        ? 0.42
+                        : 0.28;
+              el.style.transform = `scale(${scale})`;
+              el.style.opacity = String(opacity);
             }
           }
         }
+
+        if (!hasPositioned) {
+          for (let i = 0; i < displayLines.length; i++) {
+            if (i !== activeIdx) resetLineLetters(i);
+          }
+        } else if (activeChanged) {
+          if (prevStyledActiveIdx >= 0 && prevStyledActiveIdx !== activeIdx) {
+            resetLineLetters(prevStyledActiveIdx);
+          }
+          if (activeIdx >= 0) {
+            resetLineLetters(activeIdx);
+          }
+        }
+
+        if (activeIdx !== lastSweepLineIdx) {
+          lastSweepLineIdx = activeIdx;
+          const activeLen =
+            activeIdx >= 0 ? (letterSpansRef.current[activeIdx]?.length ?? 0) : 0;
+          letterStates = new Int8Array(activeLen).fill(-1);
+          liftedLetters.clear();
+        }
+
+        if (shouldSnap && !singleLine) {
+          void viewport.offsetHeight;
+          viewport.classList.remove("no-scroll-transition");
+        }
+
+        prevStyledActiveIdx = activeIdx;
+        prevStyledDisplayIdx = displayIdx;
+        prevVpWidth = vpWidth;
+        prevVpHeight = vpHeight;
+        prevAnchorTop = anchorTop;
+        prevAnchorHeight = anchorHeight;
+        hasPositioned = true;
       }
 
+      const currentAccentRgb = accentRgbRef.current;
       const sparkInterval = singleLine ? 6 : 4;
       const maxSparks = singleLine ? 8 : 18;
       if (!reduceMotion && track.playing) {
@@ -799,6 +876,10 @@ function LyricalViewport({
         const entry = displayLines[activeIdx];
         if (!entry.isIntroDots) {
           const letterSpans = letterSpansRef.current[activeIdx] ?? [];
+          if (letterStates.length !== letterSpans.length) {
+            letterStates = new Int8Array(letterSpans.length).fill(-1);
+          }
+
           let exactChar = 0;
           const timings = entry.letterTimings;
           if (timings && timings.length === letterSpans.length) {
@@ -835,62 +916,113 @@ function LyricalViewport({
 
           const activeLetterIdx = Math.floor(exactChar);
           const fraction = exactChar - activeLetterIdx;
+          const accentChanged = currentAccentRgb !== lastSweepAccentRgb;
+
+          // Measure active letter before writing inline styles to avoid forced layout reflow.
+          if (
+            needSparkRect &&
+            activeLetterIdx >= 0 &&
+            activeLetterIdx < letterSpans.length
+          ) {
+            const activeSp = letterSpans[activeLetterIdx];
+            if (
+              activeSp.textContent?.trim() &&
+              (!timings ||
+                !timings[activeLetterIdx] ||
+                (lyricPos >= timings[activeLetterIdx].start &&
+                  lyricPos < timings[activeLetterIdx].end))
+            ) {
+              const vpRect = viewport.getBoundingClientRect();
+              const r = activeSp.getBoundingClientRect();
+              activeLetterRect = {
+                x: r.left - vpRect.left,
+                y: r.top - vpRect.top,
+                w: r.width,
+                h: r.height,
+              };
+            }
+          }
 
           const liftPx = singleLine ? -0.6 : -0.9;
           const scaleAmp = singleLine ? 0.025 : 0.035;
+          if (!reduceMotion) {
+            for (const prevW of liftedLetters) {
+              if (Math.abs(prevW - exactChar) > 3.5) {
+                const sp = letterSpans[prevW];
+                if (sp) sp.style.transform = "";
+                liftedLetters.delete(prevW);
+              }
+            }
+          } else if (liftedLetters.size > 0) {
+            for (const prevW of liftedLetters) {
+              const sp = letterSpans[prevW];
+              if (sp) sp.style.transform = "";
+            }
+            liftedLetters.clear();
+          }
+
           for (let w = 0; w < letterSpans.length; w++) {
             const sp = letterSpans[w];
             if (!reduceMotion) {
               const distFromSweep = Math.abs(w - exactChar);
-              const influence = Math.max(0, 1 - distFromSweep / 3);
-              const ease = influence * influence * (3 - 2 * influence);
-              sp.style.transform =
-                ease > 0.01
-                  ? `translateY(${(liftPx * ease).toFixed(2)}px) scale(${(1 + scaleAmp * ease).toFixed(3)})`
-                  : "";
-            } else {
-              sp.style.transform = "";
-            }
-
-            if (w < activeLetterIdx) {
-              sp.style.color = "#ffffff";
-              sp.style.textShadow = "0 0 16px rgba(255, 255, 255, 0.5)";
-              sp.style.background = "";
-              sp.style.backgroundClip = "";
-              sp.style.webkitBackgroundClip = "";
-              sp.style.webkitTextFillColor = "";
-            } else if (w > activeLetterIdx) {
-              sp.style.color = "rgba(255, 255, 255, 0.4)";
-              sp.style.textShadow = "none";
-              sp.style.background = "";
-              sp.style.backgroundClip = "";
-              sp.style.webkitBackgroundClip = "";
-              sp.style.webkitTextFillColor = "";
-            } else {
-              sp.style.background = `linear-gradient(to right, #ffffff 0%, #ffffff 42%, rgba(${accentRgb}, 1) 50%, rgba(255, 255, 255, 0.4) 58%, rgba(255, 255, 255, 0.4) 100%)`;
-              sp.style.backgroundSize = "200% 100%";
-              sp.style.backgroundPosition = `${(100 - fraction * 100).toFixed(1)}% 0%`;
-              sp.style.backgroundClip = "text";
-              sp.style.webkitBackgroundClip = "text";
-              sp.style.webkitTextFillColor = "transparent";
-              sp.style.textShadow = `0 0 13px rgba(${accentRgb}, 0.42)`;
-
-              if (
-                needSparkRect &&
-                sp.textContent?.trim() &&
-                (!timings || !timings[w] || (lyricPos >= timings[w].start && lyricPos < timings[w].end))
-              ) {
-                const vpRect = viewport.getBoundingClientRect();
-                const r = sp.getBoundingClientRect();
-                activeLetterRect = {
-                  x: r.left - vpRect.left,
-                  y: r.top - vpRect.top,
-                  w: r.width,
-                  h: r.height,
-                };
+              if (distFromSweep <= 3.5) {
+                const influence = Math.max(0, 1 - distFromSweep / 3);
+                const ease = influence * influence * (3 - 2 * influence);
+                if (ease > 0.01) {
+                  sp.style.transform = `translateY(${(liftPx * ease).toFixed(2)}px) scale(${(1 + scaleAmp * ease).toFixed(3)})`;
+                  liftedLetters.add(w);
+                } else if (liftedLetters.has(w)) {
+                  sp.style.transform = "";
+                  liftedLetters.delete(w);
+                }
               }
             }
+
+            const nextState = w < activeLetterIdx ? 2 : w > activeLetterIdx ? 0 : 1;
+            const prevState = letterStates[w];
+
+            if (nextState === 2) {
+              if (prevState !== 2) {
+                sp.style.color = "#ffffff";
+                sp.style.textShadow = "0 0 16px rgba(255, 255, 255, 0.5)";
+                if (prevState === 1 || prevState === -1) {
+                  sp.style.background = "";
+                  sp.style.backgroundSize = "";
+                  sp.style.backgroundPosition = "";
+                  sp.style.backgroundClip = "";
+                  sp.style.webkitBackgroundClip = "";
+                  sp.style.webkitTextFillColor = "";
+                }
+                letterStates[w] = 2;
+              }
+            } else if (nextState === 0) {
+              if (prevState !== 0) {
+                sp.style.color = "rgba(255, 255, 255, 0.4)";
+                sp.style.textShadow = "none";
+                if (prevState === 1 || prevState === -1) {
+                  sp.style.background = "";
+                  sp.style.backgroundSize = "";
+                  sp.style.backgroundPosition = "";
+                  sp.style.backgroundClip = "";
+                  sp.style.webkitBackgroundClip = "";
+                  sp.style.webkitTextFillColor = "";
+                }
+                letterStates[w] = 0;
+              }
+            } else {
+              if (prevState !== 1 || accentChanged) {
+                sp.style.background = `linear-gradient(to right, #ffffff 0%, #ffffff 42%, rgba(${currentAccentRgb}, 1) 50%, rgba(255, 255, 255, 0.4) 58%, rgba(255, 255, 255, 0.4) 100%)`;
+                sp.style.backgroundSize = "200% 100%";
+                sp.style.backgroundClip = "text";
+                sp.style.webkitBackgroundClip = "text";
+                sp.style.webkitTextFillColor = "transparent";
+                sp.style.textShadow = `0 0 13px rgba(${currentAccentRgb}, 0.42)`;
+                letterStates[w] = 1;
+              }
+              sp.style.backgroundPosition = `${(100 - fraction * 100).toFixed(1)}% 0%`;
+            }
           }
+          lastSweepAccentRgb = currentAccentRgb;
         }
       }
 
@@ -926,13 +1058,15 @@ function LyricalViewport({
               continue;
             }
             ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius * 2.5, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(${currentAccentRgb}, ${(p.opacity * 0.28).toFixed(3)})`;
+            ctx.fill();
+
+            ctx.beginPath();
             ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
-            ctx.shadowBlur = 8;
-            ctx.shadowColor = `rgba(${accentRgb}, 0.75)`;
             ctx.fillStyle = `rgba(255, 255, 255, ${p.opacity.toFixed(3)})`;
             ctx.fill();
           }
-          ctx.shadowBlur = 0;
         } else {
           particlesRef.current = [];
         }
@@ -940,23 +1074,27 @@ function LyricalViewport({
     };
 
     const tick = () => {
-      applyFrame();
+      applyFrame(false);
       if (track.playing) {
         rafId = requestAnimationFrame(tick);
       }
     };
 
-    applyFrame();
+    applyFrameRef.current = applyFrame;
+    applyFrame(true);
     if (track.playing) {
       rafId = requestAnimationFrame(tick);
     }
-    return () => cancelAnimationFrame(rafId);
-  }, [displayLines, linesKey, track.playing, accentRgb, reduceMotion, singleLine, extraRightPx]);
+    return () => {
+      applyFrameRef.current = null;
+      cancelAnimationFrame(rafId);
+    };
+  }, [displayLines, linesKey, track.playing, reduceMotion, singleLine, extraRightPx]);
 
   return (
     <div className={"lyrical-viewport" + (singleLine ? " single-line" : "")} ref={viewportRef}>
       <canvas ref={canvasRef} className="lyric-sparks-canvas" aria-hidden="true" />
-      <div className="lyrical-container" key={linesKey}>
+      <div className="lyrical-container" key={linesKey} ref={containerRef}>
         {displayLines.map((line, index) => (
           <div
             key={line.key}
@@ -1196,27 +1334,6 @@ function Player({
   return (
     <section aria-label="Now playing" className="music-layout">
       <div className="music-left" ref={lyricsPopoverWrapRef}>
-        {track.sessions.length > 1 && (
-          <div className="media-source-row">
-            <select
-              aria-label="Media player session"
-              value={selectedSource}
-              onChange={(e) => {
-                const val = e.target.value;
-                setSelectedSource(val);
-                void invoke("select_media_session", { sourceId: val });
-              }}
-            >
-              <option value="">Active (Auto)</option>
-              {track.sessions.map((s) => (
-                <option key={s.sourceId} value={s.sourceId}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
         <div className="music-hero">
           <Cover key={track.artwork ?? track.title} track={track} />
           <div className="music-meta-controls">
@@ -1262,9 +1379,9 @@ function Player({
                   (lyricsMenuOpen ? " is-open" : "") +
                   (!preferences.lyricsEnabled || !preferences.idleLyricsEnabled ? " is-dim" : "")
                 }
-                aria-label="Lyrics settings"
+                aria-label="Music & lyrics settings"
                 aria-expanded={lyricsMenuOpen}
-                title="Lyrics settings"
+                title="Music & lyrics settings"
                 onClick={() => setLyricsMenuOpen((v) => !v)}
               >
                 <Settings size={15} strokeWidth={1.75} />
@@ -1274,7 +1391,7 @@ function Player({
         </div>
 
         {lyricsMenuOpen && (
-          <div className="music-lyrics-popover" role="dialog" aria-label="Lyrics settings">
+          <div className="music-lyrics-popover" role="dialog" aria-label="Music & lyrics settings">
             <button
               type="button"
               role="switch"
@@ -1303,6 +1420,45 @@ function Player({
                 {preferences.lyricsEnabled ? "On" : "Off"}
               </span>
             </button>
+            {track.sessions.length > 1 && (
+              <div className="music-popover-section">
+                <span className="music-popover-label">Player</span>
+                <div className="music-popover-sources" role="radiogroup" aria-label="Media player session">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={selectedSource === ""}
+                    className={"music-popover-source-btn" + (selectedSource === "" ? " is-active" : "")}
+                    onClick={() => {
+                      setSelectedSource("");
+                      void invoke("select_media_session", { sourceId: "" });
+                    }}
+                  >
+                    <span className="truncate">Active (Auto)</span>
+                    {selectedSource === "" && <Check size={11} />}
+                  </button>
+                  {track.sessions.map((s) => {
+                    const active = selectedSource === s.sourceId;
+                    return (
+                      <button
+                        key={s.sourceId}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        className={"music-popover-source-btn" + (active ? " is-active" : "")}
+                        onClick={() => {
+                          setSelectedSource(s.sourceId);
+                          void invoke("select_media_session", { sourceId: s.sourceId });
+                        }}
+                      >
+                        <span className="truncate">{s.name}</span>
+                        {active && <Check size={11} />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

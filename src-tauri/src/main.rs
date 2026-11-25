@@ -237,6 +237,7 @@ fn main() {
             shelf::convert_shelf_image,
             shelf::start_file_drag,
             shelf::start_qr_transfer,
+            shelf::start_qr_send_files,
             shelf::start_qr_receive,
             shelf::get_qr_transfer,
             shelf::allow_lan_firewall,
